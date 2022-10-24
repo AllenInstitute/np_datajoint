@@ -1,0 +1,10 @@
+# name: dj
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - pip
+  - pyzmq
+  - pip:
+    - -r requirements.txt
