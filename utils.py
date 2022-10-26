@@ -1,47 +1,67 @@
+import datetime
 import hashlib
 import json
 import logging
 import os
 import pathlib
 import re
+import sys
 import tempfile
+import time
+import uuid
 from typing import List, Sequence, Set, Tuple
 
 import datajoint as dj
 import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
-import djsciops.settings as dj_settings
+import mpeconfig
 
-# import mpeconfig
-# configuration =  mpeconfig.source_configuration('/projects/datajoint')
+# logging.basicConfig(level=logging.DEBUG, filename='upload.log', filemode='w')
+os.environ['DJSCIOPS_LOG_LEVEL'] = 'DEBUG'
 
-DJ_INBOX = f"mindscope_dynamic-routing/inbox"
-KS_PARAMS_INDEX = 1
+# get zookeeper config -----------------------------------------------------------------
+zk_config =  mpeconfig.source_configuration(
+    project_name='datajoint',
+    hosts='eng-mindscope:2181',
+    rig_id=os.environ.get("aibs_rig_id","BTVTest.1"),
+    comp_id=os.environ.get("aibs_comp_id","BTVTest.1-Sync"),
+    fetch_logging_config=False,
+)
+## alternative method to get a specific config by its path
+# with mpeconfig.ConfigServer(hosts='eng-mindscope:2181') as zk:
+#     zk_config = mpeconfig.fetch_configuration(
+#         server=zk,
+#         config_path='/projects/datajoint/defaults/configuration',
+#         required=True
+#     )
 
-dj.config['database.host'] = 'rds.datajoint.io'
-dj.config['database.user'] = 'bjhardcastle'
-dj.config['database.password'] = '@78Yymr4rvDkqc'
-dj.config['database.use_tls'] = False
+# apply zookeeper config to datajoint session
+dj.config.update(zk_config['datajoint']) # dj.config is a custom class behaving as a dict - don't directly assign a dict
+logger = dj.logger
 
+S3_SESSION = dj_auth.Session(
+    aws_account_id=zk_config['djsciops']["aws"]["account_id"],
+    s3_role=zk_config['djsciops']["s3"]["role"],
+    auth_client_id=zk_config['djsciops']["djauth"]["client_id"],
+    auth_client_secret=zk_config['djsciops']["djauth"]["client_secret"],
+)
+S3_BUCKET = zk_config['djsciops']["s3"]["bucket"]
+
+DJ_INBOX = zk_config['sorting']['remote_inbox'] #f"mindscope_dynamic-routing/inbox"
+DJ_OUTBOX = zk_config['sorting']['remote_outbox'] #f"mindscope_dynamic-routing/inbox"
+LOCAL_INBOX = pathlib.Path(zk_config['sorting']['local_inbox'])
+
+BOTO3_CONFIG = zk_config['djsciops']['boto3']
+KS_PARAMS_INDEX = zk_config['sorting']['default_kilosort_parameter_set_index'] # 1=KS 2.0, 2=KS 2.5
+
+# create virtual datajoin modules for querying tables ---------------------------------- #
 dj_subject = dj.create_virtual_module('subject', 'mindscope_dynamic-routing_subject')
 dj_session = dj.create_virtual_module('session', 'mindscope_dynamic-routing_session')
 dj_ephys = dj.create_virtual_module('ephys', 'mindscope_dynamic-routing_ephys')
 
-djsc_config = dj_settings.get_config()
-djsc_config["djauth"]["client_id"] = "MindscopeDynamicRouting" # put these in a .env file and use os.environ.get('CLIENT_ID')
-djsc_config["djauth"]["client_secret"] = os.environ.get('DATAJOINT_CLIENT_SECRET')
-
-s3_session = dj_auth.Session(
-    aws_account_id=djsc_config["aws"]["account_id"],
-    s3_role=djsc_config["s3"]["role"],
-    auth_client_id=djsc_config["djauth"]["client_id"],
-    auth_client_secret=djsc_config["djauth"]["client_secret"],
-)
-s3_bucket = djsc_config["s3"]["bucket"]
-
 # general ------------------------------------------------------------------------------ #
 def get_session_folder(path: str|pathlib.Path) -> str|None:
-    """Extract [8+digit session ID]_[6-digit mouse ID]_[6-digit date
+    """Extract [8+digit session ID]_[6-digit mouse ID]_[8-digit date
     str] from a string or path"""
     session_reg_exp = R"[0-9]{8,}_[0-9]{6}_[0-9]{8}"
 
@@ -52,9 +72,8 @@ def get_session_folder(path: str|pathlib.Path) -> str|None:
                 f"Mismatch between session folder strings - file may be in the wrong folder: {path}"
             )
         return session_folders[0]
-    else:
-        return None
-    
+    return None
+
 def dir_size(path:pathlib.Path) -> int:
     """Return the size of a directory in bytes"""
     if not path.is_dir():
@@ -216,6 +235,10 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path]) -> pathlib.Path:
     
     For recordings split across multiple locations e.g. A:/*_probeABC, B:/*_probeDEF
     """
+    if isinstance(paths, pathlib.Path):
+        return paths
+    if len(paths) == 1 and isinstance(paths[0], pathlib.Path) and paths[0].suffix == '.oebin':
+        return paths[0]
     
     # ensure oebin files can be merged - if from the same exp they will have the same settings.xml file
     check_xml_files_match([p / 'settings.xml' for p in [o.parent.parent.parent for o in paths]])
@@ -252,44 +275,221 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path]) -> pathlib.Path:
     return merged_oebin_path
 
 # datajoint-related --------------------------------------------------------------------
-def create_clustering_task_entry(session_dir: str, probe: int, paramset_idx: int = KS_PARAMS_INDEX):
+class DataJointSession:
+    """A class to handle data transfers between local rigs/network shares, and the DataJoint server."""
+    class SessionDirNotFoundError(ValueError):
+        pass
+    
+    def __init__(self, path_or_session_folder: str|pathlib.Path):
+        session_folder = get_session_folder(str(path_or_session_folder))
+        if session_folder is None:            
+            raise self.__class__.SessionDirNotFoundError(f"Input does not contain a session directory (e.g. 123456789_366122_20220618): {path_or_session_folder}")
+        self.session_folder = session_folder
+        "[8+digit session ID]_[6-digit mouse ID]_[8-digit date]"
+        if any(slash in str(path_or_session_folder) for slash in '\\/'):
+            self.path = pathlib.Path(path_or_session_folder)
+        self.session_id, self.mouse_id, *_ = self.session_folder.split('_')
+        self.date = datetime.datetime.strptime(self.session_folder.split('_')[2],"%Y%m%d")
+    
+    @property
+    def session_key(self) -> dict[str,str|int]:
+        "subject:`str` and session_id:`int`"
+        return (dj_session.Session & {'session_id': self.session_id}).fetch1('KEY')
+    @property
+    def probe_insertion(self):
+        return (dj_ephys.ProbeInsertion & self.session_key)
+    @property
+    def clustering_task(self):
+        return (dj_ephys.ClusteringTask & self.session_key)
+    @property
+    def curated_clustering(self):
+        return (dj_ephys.CuratedClustering & self.session_key)
+    @property
+    def sorting_complete(self) -> bool:
+        return (
+            len(self.clustering_task) == 
+            len(self.curated_clustering) >= 
+            len(self.probe_insertion) > 0
+            )
+        
+    @property
+    def remote_session_dir_relative(self) -> str:
+        "Relative session_dir on datajoint server with no database prefix."
+        return (dj_session.SessionDirectory & self.session_key).fetch1('session_dir')
+    
+    @property
+    def remote_session_dir_outbox(self) -> str:
+        "Root for session sorted data on datajoint server."
+        return DJ_OUTBOX / self.session_folder + '/'
+    
+    @property
+    def remote_session_dir_inbox(self) -> str:
+        "Root for session uploads on datajoint server."
+        return DJ_INBOX / self.session_folder + '/'
+    
+    @property
+    def acq_paths(self) -> List[pathlib.Path]:
+        paths = []
+        for drive, probes in zip('AB', ['_probeABC', '_probeDEF']):
+            path = pathlib.Path(f"{drive}:{self.session_folder}/{probes}")
+            if path.is_dir():
+                paths.append(path)
+        return paths
+    
+    @property
+    def npexp_path(self) -> pathlib.Path|None:
+        path = pathlib.Path("//allen/programs/mindscope/workgroups/np-exp") / self.session_folder
+        return path if path.is_dir() else None
+    
+    @property    
+    def local_download_path(self) -> pathlib.Path:
+        return pathlib.Path(LOCAL_INBOX) / self.session_folder
+    
+    def add_clustering_task(self, paramset_idx: int, probe_letters:Sequence[str]='ABCDEF'):
+        "For existing entries in dj_ephys.EphysRecording, create a new ClusteringTask with the specified `paramset_idx`"
+        for probe_letter in probe_letters:
+            probe_idx = ord(probe_letter) - ord('A')
+            
+            insertion_key = {'subject': self.mouse_id, 'session': self.session_id, 'insertion_number': probe_idx}
+
+            method = (dj_ephys.ClusteringParamSet * dj_ephys.ClusteringMethod &
+                    insertion_key).fetch('clustering_method')[paramset_idx].replace(".", "-")
+            
+            output_dir = f"{self.remote_session_dir_relative}/{method}_{paramset_idx}/probe{probe_letter}_sorted"
+
+            task_key = {
+                'subject': self.mouse_id,
+                'session_id': self.session_id,
+                'insertion_number': probe_idx,
+                'paramset_idx': paramset_idx,
+                'clustering_output_dir': output_dir,
+                'task_mode': 'trigger'
+            }
+
+            if dj_ephys.ClusteringTask & task_key:
+                logger.info(f'Clustering task already exists: {task_key}')
+                return
+            else:
+                dj_ephys.ClusteringTask.insert1(task_key, replace=True)
+
+        
+    def upload(self, paths:Sequence[str|pathlib.Path]=None):
+        """Upload from rig/network share to DataJoint server.
+        
+        Accepts a list of paths to upload, or if None, will try to upload from A:/B:,
+        then np-exp, then lims.
+        """
+        if paths is None:
+            if self.path is not None:
+                paths = [self.path]
+            elif ( # we're currently on a rig Acq computer
+                comp := os.environ.get("aibs_comp_id", None)
+                and comp in [f'NP.{rig}-Acq' for rig in '012']
+                ):
+                paths = self.acq_paths
+        if paths is None and self.npexp_path:
+            paths = [self.npexp_path]
+        if paths is None:
+            raise ValueError("No paths to upload from")
+        
+        local_oebin_paths, remote_oebin_path = get_local_remote_oebin_paths(self.path)
+        local_session_paths_for_upload = [p.parent.parent.parent for p in local_oebin_paths]
+
+        self.create_session_entry()
+        
+        # upload merged oebin file first
+        # ------------------------------------------------------- #
+        # axon upload won't allow us to overwrite an existing file
+        temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths)
+        dj_axon.upload_files(
+            source=temp_merged_oebin_path,
+            destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.as_posix()}/",
+            session=S3_SESSION,
+            s3_bucket=S3_BUCKET,
+            )
+
+        
+        # upload rest of raw data
+        # ------------------------------------------------------- #
+        for local_path in local_session_paths_for_upload:
+            dj_axon.upload_files(
+                source=local_path,
+                destination=self.remote_session_dir_inbox,
+                session=S3_SESSION,
+                s3_bucket=S3_BUCKET,
+                ignore_regex='.*.oebin',
+                )
+
+    def download(self, wait_on_sorting=False):
+        "Download small files from sorting to /workgroups/dynamicrouting/."
+        if not self.sorting_complete and not wait_on_sorting:
+            return
+        while not self.sorting_complete:
+            wait_on_process(sec=1800, msg=f"Waiting for {self.session_folder} processing to complete to download sorted data...")
+        dj_axon.download_files(
+            source=self.remote_session_dir_inbox,
+            destination= f"{self.local_download_path}\\", # if using linux - this should be fwd slash
+            session=S3_SESSION,
+            s3_bucket=S3_BUCKET,
+            ignore_regex=R".*\.dat|.*\.mat|.*\.npy",
+        )
+        
+    def create_session_entry(self):
+        "Insert metadata for session in datajoint tables"
+        if dj_session.SessionDirectory & {'session_dir': self.session_folder}:
+            print(f'Session entry already exists for {self.session_folder}')
+
+        if not dj_subject.Subject & {'subject': self.mouse_id}:
+            # insert new subject
+            dj_subject.Subject.insert1(
+                    {
+                    'subject': self.mouse_id,
+                    'sex': 'U',
+                    'subject_birth_date': "1900-01-01"
+                    },
+                skip_duplicates=True
+            )
+        
+        with dj_session.Session.connection.transaction:
+            dj_session.Session.insert1(
+                {
+                    'subject': self.mouse_id,
+                    'session_id': self.session_id,
+                    'session_datetime': self.date,
+                },
+            skip_duplicates=True,
+            )
+            dj_session.SessionDirectory.insert1(
+                {
+                    'subject': self.mouse_id,
+                    'session_id': self.session_id,
+                    'session_dir': self.remote_session_dir_relative,
+                }, 
+            replace=True,
+            )
+
+def wait_on_process(sec=3600, msg="Still processing..."):
+    fmt = "%a %H:%M" # e.g. Mon 12:34
+    file = sys.stdout
+    time_now = time.strftime(fmt, time.localtime())
+    time_next = time.strftime(fmt, time.localtime(time.time() + float(sec)))
+    file.write("\n%s: %s\nNext check: %s\r" % (time_now, msg, time_next))
+    file.flush()
+    time.sleep(sec)
+
+def add_new_clustering_parameters(clustering_method:str, paramset_desc:str, params:dict, paramset_idx:int):
     """
-    For existing entries in ephys.EphysRecording,
-        create a new ClusteringTask with the specified "paramset_idx"
     Example:
-        insertion_key = {'subject': '614608', 'session': 1187940755, 'insertion_number': 0}
-        paramset_idx = 1
-        create_clustering_task_entry(insertion_key, paramset_idx)
+    add_new_clustering_parameters(
+        clustering_method='kilosort2.0',
+        paramset_desc='Mindscope parameter set for Kilosort2.0',
+        params=KS_PARAMS,
+        paramset_idx=3, # 1 and 2 already used
+        )
     """
-    sessionID, mouseID, dateID, *_ = session_dir.split('_')
-    insertion_key = {'subject': mouseID, 'session': sessionID, 'insertion_number': probe}
-
-    method = (ephys.ClusteringParamSet * ephys.ClusteringMethod &
-              insertion_key).fetch('clustering_method')[paramset_idx].replace(".", "-")
-    output_dir = f"{session_dir}/{method}_{paramset_idx}/probe{chr(ord('A') + insertion_key['insertion_number'])}_sorted"
-
-    task_key = {
-        'subject': mouseID,
-        'session_id': sessionID,
-        'insertion_number': probe,
-        'paramset_idx': paramset_idx,
-        'clustering_output_dir': output_dir,
-        'task_mode': 'trigger'
-    }
-
-    if ephys.ClusteringTask & task_key:
-        logger.info(f'Clustering task already exists - {task_key}')
-        return
-    else:
-        ephys.ClusteringTask.insert1(task_key, replace=True)
-
-
-def insert_new_params(clustering_method: str, paramset_desc: str, params: dict, paramset_idx: int):
 
     def dict_to_uuid(key):
-        """
-        Given a dictionary `key`, returns a hash string as UUID
-        """
+        "Given a dictionary `key`, returns a hash string as UUID."
         hashed = hashlib.md5()
         for k, v in sorted(key.items()):
             hashed.update(str(k).encode())
@@ -300,158 +500,14 @@ def insert_new_params(clustering_method: str, paramset_desc: str, params: dict, 
         'clustering_method': clustering_method,
         'paramset_idx': paramset_idx,
         'paramset_desc': paramset_desc,
-        'params': KS_PARAMS,
+        'params': params,
         'param_set_hash': dict_to_uuid({
             **params, 'clustering_method': clustering_method
         })
     }
-    ephys.ClusteringParamSet.insert1(param_dict, skip_duplicates=True)
+    dj_ephys.ClusteringParamSet.insert1(param_dict, skip_duplicates=True)
 
-
-def create_session_entry(session_dir, remote_session_relative_path):
-    """ Insert metadata for session on datajoint server
-
-    Args:
-        session_dir (str): local folder name, eg 1187940755_614608_20220629_probeDEF (_probeDEF is optional, has no effect)
-        remote_session_relative_path (str): path to structure.oebin file, relative to session_dir's parent 
-    """
-
-    remote_session_relative_path = f"{pathlib.Path(remote_session_relative_path).as_posix()}/"
-
-    sessionID, mouseID, dateID, *_ = session_dir.split('_')
-
-    if session.SessionDirectory & {'session_dir': remote_session_relative_path}:
-        print(f'Session entry already exists for {remote_session_relative_path}')
-
-    if not subject.Subject & {'subject': mouseID}:
-        # insert new subject, default DOB to '1900-01-01' - to be updated by users
-        subject.Subject.insert1({
-            'subject': mouseID,
-            'sex': 'U',
-            'subject_birth_date': "1900-01-01"
-        },
-        skip_duplicates=True)
-
-    KS_PARAMS_INDEX = 1
-    # insert_new_params(
-    #     clustering_method='kilosort2.0',
-    #     paramset_desc='Mindscope parameter set for Kilosort2.0',
-    #     params=KS_PARAMS,
-    #     paramset_idx=KS_PARAMS_INDEX,
-    # )
-
-    for probe_idx in range(6):
-        try:
-            create_clustering_task_entry(session_dir, probe_idx, KS_PARAMS_INDEX)
-        except:
-            pass
-
-    with session.Session.connection.transaction:
-        session.Session.insert1({
-            'subject': mouseID,
-            'session_id': sessionID,
-            'session_datetime': dateID
-        },
-                                skip_duplicates=True)
-        session.SessionDirectory.insert1(
-            {
-                'subject': mouseID,
-                'session_id': sessionID,
-                'session_dir': remote_session_relative_path,
-            }, replace=True)
-
-
-def upload(local_exp_abs_paths: pathlib.Path, remote_session_relative_path: pathlib.Path):
-    """ upload contents of all local Record Node 10_/ folders to the same folder on s3 server """
-
-    if isinstance(local_exp_abs_paths, str):
-        local_exp_abs_paths = pathlib.Path(local_exp_abs_paths)
-
-    if isinstance(remote_session_relative_path, str):
-        remote_session_relative_path = pathlib.Path(remote_session_relative_path)
-
-    if not UPLOAD_BUT_POSTPONE_SORTING:
-    # first try to upload merged oebin file (since we can't overwrite files on s3)
-        merged_oebin = pathlib.Path(tempfile.gettempdir()) / 'structure.oebin'
-        if merged_oebin.exists():
-            dj_axon.upload_files(source=merged_oebin,
-                                        destination=f"{DJ_INBOX}/{remote_session_relative_path.as_posix()}/",
-                                        session=s3_session,
-                                        s3_bucket=s3_bucket)
-
-    for local_exp_abs_path in local_exp_abs_paths:
-        try:
-            dj_axon.upload_files(source=local_exp_abs_path,
-                                 destination=f"{DJ_INBOX}/{remote_session_relative_path.parts[0]}/",
-                                 session=s3_session,
-                                 s3_bucket=s3_bucket,
-                                 ignore_regex='.*.oebin')
-        except (AssertionError, ValueError):
-            print('All files already exist in S3')
-
-
-def download(session_dir: str, session_relative_path: pathlib.Path, wait_on_sorting=False):
-    if isinstance(session_relative_path, str):
-        session_relative_path = pathlib.Path(session_relative_path)
-    if not (session.SessionDirectory & {'session_dir': session_relative_path.as_posix() + "/"}):
-        raise FileNotFoundError(f'No existing session found with session directory: {session_relative_path}')
-
-    destination = LOCAL_INBOX / session_dir
-    # destination.mkdir(parents=True, exist_ok=True)
-    # #! axon will check if folder or any files exist and abort if they do!
-    # possibly want to *delete* the folder if it exists
-
-    session_key = (session.SessionDirectory & {'session_dir': session_relative_path.as_posix() + "/"}).fetch1('KEY')
-
-    # keep trying to download probes every Xseconds until they're available
-    def probes_available() -> bool:
-        """Check Datajoint for evidence of complete, sorted data"""
-        probe_count = len(ephys.ProbeInsertion & session_key)
-        clustering_task_count = len(ephys.ClusteringTask & session_key)
-        clustering_count = len(ephys.CuratedClustering & session_key)
-        #! probe_count is incorrect (len = 0)
-        if clustering_task_count == clustering_count >= probe_count > 0:
-            return True
-        else:
-            logger.info(f'{session_dir} - processing not complete: {clustering_task_count=}|{clustering_count=}|{probe_count=}')
-            return False
-
-        # return bool(probe_count)
-
-    def wait_on_process(sec=3600, msg="Still processing..."):
-        fmt = "%a %H:%M" # e.g. Mon 12:34
-        file = sys.stdout
-        time_now = time.strftime(fmt, time.localtime())
-        time_next = time.strftime(fmt, time.localtime(time.time() + float(sec)))
-        file.write("\n%s: %s\nNext check: %s\r" % (time_now, msg, time_next))
-        file.flush()
-        time.sleep(sec)
-
-    @contextmanager
-    def suppress_stdout():
-        # from https://thesmithfam.org/blog/2012/10/25/temporarily-suppress-console-output-in-python/#:~:text=Here%E2%80%99s%20a%20handy%20way%20to%20suppress%20stdout%20temporarily,code%20into%20your%20project%3A%20from%20contextlib%20import%20contextmanager
-        with open(os.devnull, "w") as devnull:
-            old_stdout = sys.stdout
-            sys.stdout = devnull
-            try:
-                yield
-            finally:
-                sys.stdout = old_stdout
-                
-    if not probes_available() and not wait_on_sorting:
-        return
-    
-    while not probes_available():
-        wait_on_process(sec=1800, msg="Waiting for processing to complete to download sorted data...")
-
-    dj_axon.download_files(
-        source=f"mindscope_dynamic-routing/outbox/{session_dir}/",
-        destination= f"{destination}/", # if using linux - this should be fwd slash
-        session=s3_session,
-        s3_bucket=s3_bucket,
-        ignore_regex=R".*\.dat|.*\.mat|.*\.npy",
-    )
-
-p = pathlib.Path(R"\\allen\programs\mindscope\workgroups\np-exp\1219127153_632295_20221019")
-print(get_local_remote_oebin_paths(p))
+def get_clustering_parameters(paramset_idx:int=KS_PARAMS_INDEX) -> Tuple[str, dict]:
+    "Get description and dict of parameters from paramset_idx."
+    return (dj_ephys.ClusteringParamSet & {'paramset_idx': paramset_idx}).fetch1('params')
 
