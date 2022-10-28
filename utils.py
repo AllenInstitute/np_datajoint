@@ -507,8 +507,11 @@ def add_new_clustering_parameters(clustering_method:str, paramset_desc:str, para
     }
     dj_ephys.ClusteringParamSet.insert1(param_dict, skip_duplicates=True)
 
-def get_clustering_parameters(paramset_idx:int=KS_PARAMS_INDEX) -> Tuple[str, dict]:
+def get_clustering_parameters(paramset_idx: int=KS_PARAMS_INDEX) -> Tuple[str, dict]:
     "Get description and dict of parameters from paramset_idx."
+    return (dj_ephys.ClusteringParamSet & {"paramset_idx": paramset_idx}).fetch1(
+        "params"
+    )  
 
 def get_status_all_sessions():
     """Determine which tables have been autopopulated.
