@@ -509,5 +509,77 @@ def add_new_clustering_parameters(clustering_method:str, paramset_desc:str, para
 
 def get_clustering_parameters(paramset_idx:int=KS_PARAMS_INDEX) -> Tuple[str, dict]:
     "Get description and dict of parameters from paramset_idx."
-    return (dj_ephys.ClusteringParamSet & {'paramset_idx': paramset_idx}).fetch1('params')
 
+def get_status_all_sessions():
+    """Determine which tables have been autopopulated.
+    Returns:
+        A joined table indicating the number of entries several database tables starting at the session level.
+    """
+    #* not much faster than getting all sessions:
+    # def get_status_all_sessions(sessions:str|int|Sequence|None=None):
+
+    # if not sessions:
+    #     session_process_status = dj_session.Session
+    # elif isinstance(sessions, str|int):
+    #     if folder := get_session_folder(str(sessions)):
+    #         sessions = folder.split('_')[0]
+    #     session_process_status = dj_session.Session & {'session_id': str(sessions)} 
+    # else:
+    #     session_process_status = (
+    #         dj_session.Session & 
+    #         # makes one large string, not working:
+    #         ' & '.join(f'session_id={session}' for session in sessions)
+    #     )
+    session_process_status = dj_session.Session
+        
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.ProbeInsertion, insertion="count(insertion_number)", keep_all_rows=True
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.EphysRecording,
+        ephys_recording="count(insertion_number)",
+        keep_all_rows=True,
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.LFP, lfp="count(insertion_number)", keep_all_rows=True
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.ClusteringTask,
+        clustering_task="count(insertion_number)",
+        keep_all_rows=True,
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.Clustering, clustering="count(insertion_number)", keep_all_rows=True
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.CuratedClustering,
+        curated_clustering="count(insertion_number)",
+        keep_all_rows=True,
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.QualityMetrics, qc_metrics="count(insertion_number)", keep_all_rows=True
+    )
+    session_process_status *= dj_session.Session.aggr(
+        dj_ephys.WaveformSet, waveform="count(insertion_number)", keep_all_rows=True
+    )
+
+    return session_process_status.proj(
+        ..., all_done="insertion > 0 AND waveform = clustering_task"
+    )
+    
+def sorting_summary() -> pd.DataFrame:
+    df = pd.DataFrame(get_status_all_sessions())
+    # make new 'session' column that matches our local session folder names
+    session_str_from_datajoint_keys = lambda x: x.session_id.astype(str) + "_" + x.subject + "_" + x.session_datetime.dt.strftime('%Y%m%d')
+    df = df.assign(session=session_str_from_datajoint_keys)
+    # filter for sessions with correctly formatted session/mouse/date keys
+    df = df.loc[~(pd.Series(map(get_session_folder, df.session)).isnull())]
+    df.set_index("session", inplace=True)
+    df.sort_values(by='session', ascending=False, inplace=True)
+    # remove columns that were concatenated into the new 'session' column
+    df.drop(columns=["session_id", "subject", "session_datetime"], inplace=True)
+    return df
+
+def database_diagram() -> IPython.display.SVG:
+    diagram = dj.Diagram(dj_subject.Subject) + dj.Diagram(dj_session.Session) + dj.Diagram(dj_probe) + dj.Diagram(dj_ephys)
+    return diagram.make_svg()
