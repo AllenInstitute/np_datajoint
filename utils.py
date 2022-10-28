@@ -14,10 +14,16 @@ from typing import List, Sequence, Set, Tuple
 import datajoint as dj
 import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
+import djsciops.settings as dj_settings
 import mpeconfig
+import pandas as pd
+import IPython
 
 # logging.basicConfig(level=logging.DEBUG, filename='upload.log', filemode='w')
-os.environ['DJSCIOPS_LOG_LEVEL'] = 'DEBUG'
+# os.environ["DJSCIOPS_LOG_LEVEL"] = "debug" #! not working
+# dj_settings.LOG_LEVEL = "debug" #! not working
+logger = dj.logger
+logger.setLevel('INFO')
 
 # get zookeeper config -----------------------------------------------------------------
 zk_config =  mpeconfig.source_configuration(
