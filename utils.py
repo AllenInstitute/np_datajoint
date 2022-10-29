@@ -325,7 +325,7 @@ class DataJointSession:
             )
         print(f"Downloading {self.session_folder} sorting results...")
         dj_axon.download_files(
-            source=self.remote_session_dir_inbox,
+            source=self.remote_session_dir_outbox,
             destination=f"{self.local_download_path}\\",  # if using linux - this should be fwd slash
             session=S3_SESSION,
             s3_bucket=S3_BUCKET,
