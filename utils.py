@@ -10,6 +10,7 @@ import tempfile
 import time
 import uuid
 from typing import List, Sequence, Set, Tuple
+from collections.abc import Iterable
 
 import datajoint as dj
 import djsciops.authentication as dj_auth
