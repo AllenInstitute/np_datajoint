@@ -740,6 +740,10 @@ def sorting_summary() -> pd.DataFrame:
     df.drop(columns=["session_id", "subject", "session_datetime"], inplace=True)
     return df
 
+def sorted_sessions() -> Iterable[DataJointSession]:
+    df = sorting_summary()
+    yield from (DataJointSession(session) for session in df.loc[df['all_done'] == 1].index)
+
 def database_diagram() -> IPython.display.SVG:
     diagram = dj.Diagram(dj_subject.Subject) + dj.Diagram(dj_session.Session) + dj.Diagram(dj_probe) + dj.Diagram(dj_ephys)
     return diagram.make_svg()
