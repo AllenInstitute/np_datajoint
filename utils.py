@@ -330,7 +330,7 @@ class DataJointSession:
             destination=f"{self.local_download_path}\\",  # if using linux - this should be fwd slash
             session=S3_SESSION,
             s3_bucket=S3_BUCKET,
-            ignore_regex=R".*\.dat|.*\.mat|.*\.npy",
+            ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json.*",
         )
         
     def sorting_summary(self):
