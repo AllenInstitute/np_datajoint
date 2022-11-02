@@ -11,6 +11,7 @@ import time
 import uuid
 from typing import List, Sequence, Set, Tuple
 from collections.abc import Iterable
+from typing import Generator
 
 import datajoint as dj
 import djsciops.authentication as dj_auth
@@ -134,10 +135,12 @@ class DataJointSession:
 
     @property
     def curated_clustering(self):
+        "Don't get subtables from this query - they won't be specific to the session_key"
         return dj_ephys.CuratedClustering & self.session_key
     
     @property
     def metrics(self):
+        "Don't get subtables from this query - they won't be specific to the session_key"
         return dj_ephys.QualityMetrics & self.session_key
 
     @property
@@ -748,5 +751,3 @@ def sorted_sessions() -> Iterable[DataJointSession]:
 def database_diagram() -> IPython.display.SVG:
     diagram = dj.Diagram(dj_subject.Subject) + dj.Diagram(dj_session.Session) + dj.Diagram(dj_probe) + dj.Diagram(dj_ephys)
     return diagram.make_svg()
-# session = DataJointSession('1198130743_615048_20220812')
-# session.download()
