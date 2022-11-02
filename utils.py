@@ -191,7 +191,7 @@ class DataJointSession:
     
     def downloaded_sorted_probe_paths(self, probe_letter:str=None) -> pathlib.Path|Sequence[pathlib.Path]:
         "Paths to probe data folders downloaded from datajoint, with paramset_idx=1, or a single folder for a specified probe letter."
-        query = {'paramset_idx':1}
+        query = {'paramset_idx':KS_PARAMS_INDEX}
         probes_available = (self.clustering_task & query).fetch("insertion_number")
         probe_idx = ord(probe_letter) - ord('A') if probe_letter else None
         if probe_letter and probe_idx in probes_available:
