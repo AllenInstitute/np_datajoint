@@ -264,7 +264,7 @@ class DataJointSession:
             }
  
             if dj_ephys.ClusteringTask & task_key:
-                logger.info(f"Clustering task already exists: {task_key}")
+                dj.logger.info(f"Clustering task already exists: {task_key}")
                 return
             else:
                 dj_ephys.ClusteringTask.insert1(task_key, replace=True)
@@ -308,6 +308,7 @@ class DataJointSession:
 
         # upload rest of raw data
         # ------------------------------------------------------- #
+        logging.getLogger('web_logger').info(f'Started uploading raw data {self.session_folder}')
         for local_path in local_session_paths_for_upload:
             dj_axon.upload_files(
                 source=local_path,
@@ -317,11 +318,12 @@ class DataJointSession:
                 boto3_config=BOTO3_CONFIG,
                 ignore_regex=".*.oebin",
             )
+        logging.getLogger('web_logger').info(f'Finished uploading raw data {self.session_folder}')
 
     def download(self, wait_on_sorting=False):
         "Download small files from sorting to /workgroups/dynamicrouting/."
         if not self.sorting_finished and not wait_on_sorting:
-            print(f"Sorting not started or incomplete for {self.session_folder}: skipping download.")
+            logging.info(f"Sorting not started or incomplete for {self.session_folder}: skipping download.")
             return
         
         while not self.sorting_finished:
@@ -329,7 +331,7 @@ class DataJointSession:
                 sec=1800,
                 msg=f"Waiting for {self.session_folder} processing to complete to download sorted data...",
             )
-        print(f"Downloading {self.session_folder} sorting results...")
+        logging.getLogger('web_logger').info(f'Downloading sorted data {self.session_folder}')
         dj_axon.download_files(
             source=self.remote_session_dir_outbox,
             destination=f"{self.local_download_path}\\",  # if using linux - this should be fwd slash
@@ -338,6 +340,7 @@ class DataJointSession:
             boto3_config=BOTO3_CONFIG,
             ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json.*",
         )
+        logging.getLogger('web_logger').info(f'Finished downloading sorted data {self.local_download_path}')
         
     def sorting_summary(self):
         df = sorting_summary()
