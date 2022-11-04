@@ -287,7 +287,7 @@ class DataJointSession:
         if paths is None:
             raise ValueError("No paths to upload from")
 
-        local_oebin_paths, remote_oebin_path = get_local_remote_oebin_paths(self.path)
+        local_oebin_paths, remote_oebin_path = get_local_remote_oebin_paths(paths)
         local_session_paths_for_upload = [
             p.parent.parent.parent for p in local_oebin_paths
         ]
