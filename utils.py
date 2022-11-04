@@ -278,9 +278,9 @@ class DataJointSession:
         if paths is None:
             if self.path is not None:
                 paths = [self.path]
-            elif comp := os.environ.get(  # we're currently on a rig Acq computer
+            elif (comp := os.environ.get(  # we're currently on a rig Acq computer
                 "aibs_comp_id", None
-            ) and comp in [f"NP.{rig}-Acq" for rig in "012"]:
+            )) and comp in [f"NP.{rig}-Acq" for rig in "012"]:
                 paths = self.acq_paths
         if paths is None and self.npexp_path:
             paths = [self.npexp_path]
