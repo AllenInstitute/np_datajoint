@@ -269,7 +269,7 @@ class DataJointSession:
             else:
                 dj_ephys.ClusteringTask.insert1(task_key, replace=True)
 
-    def upload(self, paths: Sequence[str | pathlib.Path] = None):
+    def upload(self, paths: Sequence[str | pathlib.Path] = None, upload_without_sorting=False):
         """Upload from rig/network share to DataJoint server.
 
         Accepts a list of paths to upload, or if None, will try to upload from A:/B:,
@@ -292,18 +292,19 @@ class DataJointSession:
             p.parent.parent.parent for p in local_oebin_paths
         ]
 
-        self.create_session_entry()
+        if not upload_without_sorting:
+            self.create_session_entry()
 
-        # upload merged oebin file first
-        # ------------------------------------------------------- #
-        # axon upload won't allow us to overwrite an existing file
-        temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths)
-        dj_axon.upload_files(
-            source=temp_merged_oebin_path,
-            destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.as_posix()}/",
-            session=S3_SESSION,
-            s3_bucket=S3_BUCKET,
-        )
+            # upload merged oebin file first
+            # ------------------------------------------------------- #
+            # axon upload won't allow us to overwrite an existing file
+            temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths)
+            dj_axon.upload_files(
+                source=temp_merged_oebin_path,
+                destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.as_posix()}/",
+                session=S3_SESSION,
+                s3_bucket=S3_BUCKET,
+            )
 
         # upload rest of raw data
         # ------------------------------------------------------- #
