@@ -314,6 +314,7 @@ class DataJointSession:
                 destination=self.remote_session_dir_inbox,
                 session=S3_SESSION,
                 s3_bucket=S3_BUCKET,
+                boto3_config=BOTO3_CONFIG,
                 ignore_regex=".*.oebin",
             )
 
@@ -334,6 +335,7 @@ class DataJointSession:
             destination=f"{self.local_download_path}\\",  # if using linux - this should be fwd slash
             session=S3_SESSION,
             s3_bucket=S3_BUCKET,
+            boto3_config=BOTO3_CONFIG,
             ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json.*",
         )
         
