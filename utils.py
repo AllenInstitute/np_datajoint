@@ -17,7 +17,7 @@ import datajoint as dj
 import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
 import djsciops.settings as dj_settings
-import mpeconfig
+from mpetk import mpeconfig
 import pandas as pd
 import IPython
 
