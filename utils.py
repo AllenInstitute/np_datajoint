@@ -31,9 +31,8 @@ logger.setLevel('INFO')
 zk_config = mpeconfig.source_configuration(
     project_name="datajoint",
     hosts="eng-mindscope:2181",
-    rig_id=os.environ.get("aibs_rig_id", "BTVTest.1"),
-    comp_id=os.environ.get("aibs_comp_id", "BTVTest.1-Sync"),
-    fetch_logging_config=False,
+    fetch_logging_config=True,
+    send_start_log=False,
 )
 ## alternative method to get a specific config by its path
 # with mpeconfig.ConfigServer(hosts='eng-mindscope:2181') as zk:
