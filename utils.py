@@ -88,6 +88,8 @@ class DataJointSession:
         "[8+digit session ID]_[6-digit mouse ID]_[8-digit date]"
         if any(slash in str(path_or_session_folder) for slash in "\\/"):
             self.path = pathlib.Path(path_or_session_folder)
+        else:
+            self.path = None
         self.session_id, self.mouse_id, *_ = self.session_folder.split("_")
         self.date = datetime.datetime.strptime(
             self.session_folder.split("_")[2], "%Y%m%d"
