@@ -175,7 +175,7 @@ class DataJointSession:
     def acq_paths(self) -> List[pathlib.Path]:
         paths = []
         for drive, probes in zip("AB", ["_probeABC", "_probeDEF"]):
-            path = pathlib.Path(f"{drive}:{self.session_folder}/{probes}")
+            path = pathlib.Path(f"{drive}:/{self.session_folder}{probes}")
             if path.is_dir():
                 paths.append(path)
         return paths
