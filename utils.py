@@ -23,19 +23,27 @@ import IPython
 import ipywidgets as ipw
 
 # get zookeeper config -----------------------------------------------------------------
-zk_config = mpeconfig.source_configuration(
-    project_name="datajoint",
-    hosts="eng-mindscope:2181",
-    fetch_logging_config=True,
-    send_start_log=False,
-)
+# zk_config = mpeconfig.source_configuration(
+#     project_name="datajoint",
+#     hosts="eng-mindscope:2181",
+#     rig_id=os.environ.get("aibs_rig_id", os.environ.get("COMPUTERNAME")),
+#     comp_id=os.environ.get("aibs_comp_id", os.environ.get("COMPUTERNAME")),
+#     fetch_logging_config=False,
+#     send_start_log=False,
+# )
 ## alternative method to get a specific config by its path
-# with mpeconfig.ConfigServer(hosts='eng-mindscope:2181') as zk:
-#     zk_config = mpeconfig.fetch_configuration(
-#         server=zk,
-#         config_path='/projects/datajoint/defaults/configuration',
-#         required=True
-#     )
+with mpeconfig.ConfigServer(hosts="eng-mindscope:2181") as zk:
+    zk_config = mpeconfig.fetch_configuration(
+        server=zk,
+        config_path="/projects/datajoint/defaults/configuration",
+        required=True,
+    )
+
+#! this section isn't working
+# datajoint's logging is overwritten by mpeconfig, so we fwd dj msgs to mpe handlers
+# dj_log = logging.getLogger("Primary")
+# dj_log.handlers = dj.logger.handlers = logging.getLogger().handlers
+# dj_log.propagate = dj.logger.propagate = False
 
 # apply zookeeper config to datajoint session
 dj.config.update(
@@ -48,14 +56,18 @@ S3_SESSION = dj_auth.Session(
     auth_client_id=zk_config["djsciops"]["djauth"]["client_id"],
     auth_client_secret=zk_config["djsciops"]["djauth"]["client_secret"],
 )
-S3_BUCKET:str = zk_config["djsciops"]["s3"]["bucket"]
+S3_BUCKET: str = zk_config["djsciops"]["s3"]["bucket"]
 
-DJ_INBOX:str = zk_config["sorting"]["remote_inbox"]  # f"mindscope_dynamic-routing/inbox"
-DJ_OUTBOX:str = zk_config["sorting"]["remote_outbox"]  # f"mindscope_dynamic-routing/inbox"
+DJ_INBOX: str = zk_config["sorting"][
+    "remote_inbox"
+]  # f"mindscope_dynamic-routing/inbox"
+DJ_OUTBOX: str = zk_config["sorting"][
+    "remote_outbox"
+]  # f"mindscope_dynamic-routing/inbox"
 LOCAL_INBOX = pathlib.Path(zk_config["sorting"]["local_inbox"])
 
-BOTO3_CONFIG:dict = zk_config["djsciops"]["boto3"]
-KS_PARAMS_INDEX:int = zk_config["sorting"][
+BOTO3_CONFIG: dict = zk_config["djsciops"]["boto3"]
+KS_PARAMS_INDEX: int = zk_config["sorting"][
     "default_kilosort_parameter_set_index"
 ]  # 1=KS 2.0, 2=KS 2.5
 
@@ -65,13 +77,15 @@ dj_session = dj.create_virtual_module("session", "mindscope_dynamic-routing_sess
 dj_ephys = dj.create_virtual_module("ephys", "mindscope_dynamic-routing_ephys")
 dj_probe = dj.create_virtual_module("probe", "mindscope_dynamic-routing_probe")
 
-DEFAULT_PROBE_SET = tuple('ABCDEF')
+DEFAULT_PROBE_SET = tuple("ABCDEF")
+
 
 class SessionDirNotFoundError(ValueError):
     pass
+
+
 class DataJointSession:
     """A class to handle data transfers between local rigs/network shares, and the DataJoint server."""
-
 
     def __init__(self, path_or_session_folder: str | pathlib.Path):
         session_folder = get_session_folder(str(path_or_session_folder))
@@ -92,34 +106,35 @@ class DataJointSession:
         try:
             if self.session_folder != self.session_folder_from_dj:
                 raise SessionDirNotFoundError(
-                    f"Session folder `{self.session_folder}` does not match components on DataJoint: {self.session_folder_from_dj}")
+                    f"Session folder `{self.session_folder}` does not match components on DataJoint: {self.session_folder_from_dj}"
+                )
         except dj.DataJointError:
-            pass # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
-            
+            pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
+
     @property
     def session(self):
         "Datajoint session query - can be combined with `fetch` or `fetch1`"
-        if not (session := dj_session.Session & {"session_id":self.session_id}):
+        if not (session := dj_session.Session & {"session_id": self.session_id}):
             raise dj.DataJointError(f"Session {self.session_id} not found in database.")
         return session
-    
+
     @property
     def session_key(self) -> dict[str, str | int]:
         "subject:`str` and session_id:`int`"
         return self.session.fetch1("KEY")
-    
+
     @property
     def session_subject(self) -> str:
         return self.session.fetch1("subject")
-    
+
     @property
     def session_datetime(self) -> datetime.datetime:
         return self.session.fetch1("session_datetime")
-    
+
     @property
     def session_folder_from_dj(self) -> str:
         return f"{self.session_id}_{self.session_subject}_{self.session_datetime.strftime('%Y%m%d')}"
-    
+
     @property
     def probe_insertion(self):
         return dj_ephys.ProbeInsertion & self.session_key
@@ -132,7 +147,7 @@ class DataJointSession:
     def curated_clustering(self):
         "Don't get subtables from this query - they won't be specific to the session_key"
         return dj_ephys.CuratedClustering & self.session_key
-    
+
     @property
     def metrics(self):
         "Don't get subtables from this query - they won't be specific to the session_key"
@@ -146,7 +161,7 @@ class DataJointSession:
             >= len(self.probe_insertion)
             > 0
         )
-    
+
     @property
     def sorting_started(self) -> bool:
         return len(self.probe_insertion) > 0
@@ -186,52 +201,81 @@ class DataJointSession:
     @property
     def local_download_path(self) -> pathlib.Path:
         return pathlib.Path(LOCAL_INBOX) / self.session_folder
-    
-    def downloaded_sorted_probe_paths(self, probe_letter:str=None) -> pathlib.Path|Sequence[pathlib.Path]:
+
+    def downloaded_sorted_probe_paths(
+        self, probe_letter: str = None
+    ) -> pathlib.Path | Sequence[pathlib.Path]:
         "Paths to probe data folders downloaded from datajoint, with paramset_idx=1, or a single folder for a specified probe letter."
-        query = {'paramset_idx':KS_PARAMS_INDEX}
+        query = {"paramset_idx": KS_PARAMS_INDEX}
         probes_available = (self.clustering_task & query).fetch("insertion_number")
-        probe_idx = ord(probe_letter) - ord('A') if probe_letter else None
+        probe_idx = ord(probe_letter) - ord("A") if probe_letter else None
         if probe_letter and probe_idx in probes_available:
-            query['insertion_number'] = probe_idx
-            relative_probe_dir = (self.clustering_task & query).fetch1('clustering_output_dir')
-            return pathlib.Path(LOCAL_INBOX) / relative_probe_dir 
+            query["insertion_number"] = probe_idx
+            relative_probe_dir = (self.clustering_task & query).fetch1(
+                "clustering_output_dir"
+            )
+            return pathlib.Path(LOCAL_INBOX) / relative_probe_dir
         elif probe_letter:
-            raise FileNotFoundError(f"Probe{probe_letter} path not found for session {self.session_folder}")
+            raise FileNotFoundError(
+                f"Probe{probe_letter} path not found for session {self.session_folder}"
+            )
         elif probe_letter is None:
-            relative_probe_dirs = (self.clustering_task & query).fetch('clustering_output_dir')
-            return tuple(pathlib.Path(LOCAL_INBOX) / probe_dir for probe_dir in relative_probe_dirs)
-    
-    def npexp_sorted_probe_paths(self, probe_letter:str=None) -> pathlib.Path|Sequence[pathlib.Path]:
+            relative_probe_dirs = (self.clustering_task & query).fetch(
+                "clustering_output_dir"
+            )
+            return tuple(
+                pathlib.Path(LOCAL_INBOX) / probe_dir
+                for probe_dir in relative_probe_dirs
+            )
+
+    def npexp_sorted_probe_paths(
+        self, probe_letter: str = None
+    ) -> pathlib.Path | Sequence[pathlib.Path]:
         "Paths to probe data folders sorted locally, with KS pre-2.0, or a single folder for a specified probe."
-        path = lambda probe: pathlib.Path(RF"//allen/programs/mindscope/workgroups/np-exp/{self.session_folder}/{self.session_folder}_probe{probe}_sorted/continuous/Neuropix-PXI-100.0")
+        path = lambda probe: pathlib.Path(
+            Rf"//allen/programs/mindscope/workgroups/np-exp/{self.session_folder}/{self.session_folder}_probe{probe}_sorted/continuous/Neuropix-PXI-100.0"
+        )
         if probe_letter is None or probe_letter not in "ABCDEF":
             return tuple(path(probe) for probe in "ABCDEF")
         else:
             return path(probe_letter)
 
     def add_clustering_task(
-        self, paramset_idx:int=KS_PARAMS_INDEX, probe_letters: Sequence[str] = "ABCDEF"
+        self,
+        paramset_idx: int = KS_PARAMS_INDEX,
+        probe_letters: Sequence[str] = "ABCDEF",
     ):
         "For existing entries in dj_ephys.EphysRecording, create a new ClusteringTask with the specified `paramset_idx`"
         if not self.probe_insertion:
-            print(f"Probe insertions have not been auto-populated for {self.session_folder} - cannot add additional clustering task yet.")
+            print(
+                f"Probe insertions have not been auto-populated for {self.session_folder} - cannot add additional clustering task yet."
+            )
             return
             # TODO need an additional check on reqd metadata/oebin file
-        
+
         for probe_letter in probe_letters:
             probe_idx = ord(probe_letter) - ord("A")
 
-            if not dj_ephys.EphysRecording & self.session_key & {"insertion_number": probe_idx}:
-                if dj_ephys.ClusteringTask & self.session_key & {"insertion_number": probe_idx}:
+            if (
+                not dj_ephys.EphysRecording
+                & self.session_key
+                & {"insertion_number": probe_idx}
+            ):
+                if (
+                    dj_ephys.ClusteringTask
+                    & self.session_key
+                    & {"insertion_number": probe_idx}
+                ):
                     msg = f"ClusteringTask entry already exists - processing should begin soon, then additional tasks can be added."
                 elif self.probe_insertion & {"insertion_number": probe_idx}:
                     msg = f"ProbeInsertion entry already exists - ClusteringTask should be auto-populated soon."
                 else:
                     msg = f"ProbeInsertion and ClusteringTask entries don't exist - either metadata/critical files are missing, or processing hasn't started yet."
-                print(f"Skipping ClusteringTask entry for {self.session_folder}_probe{probe_letter}: {msg}")
+                print(
+                    f"Skipping ClusteringTask entry for {self.session_folder}_probe{probe_letter}: {msg}"
+                )
                 continue
-            
+
             insertion_key = {
                 "subject": self.mouse_id,
                 "session": self.session_id,
@@ -257,7 +301,7 @@ class DataJointSession:
                 "clustering_output_dir": output_dir,
                 "task_mode": "trigger",
             }
- 
+
             if dj_ephys.ClusteringTask & task_key:
                 dj.logger.info(f"Clustering task already exists: {task_key}")
                 return
@@ -266,21 +310,24 @@ class DataJointSession:
 
     def upload(
         self,
-        probes:str=DEFAULT_PROBE_SET,
+        probes: str = DEFAULT_PROBE_SET,
         paths: Sequence[str | pathlib.Path] = None,
-        without_sorting=False):
+        without_sorting=False,
+    ):
         """Upload from rig/network share to DataJoint server.
 
         Accepts a list of paths to upload, or if None, will try to upload from A:/B:,
         then np-exp, then lims.
         """
-        
+
         if paths is None:
             if self.path is not None:
                 paths = [self.path]
-            elif (comp := os.environ.get(  # we're currently on a rig Acq computer
-                "aibs_comp_id", None
-            )) and comp in [f"NP.{rig}-Acq" for rig in "012"]:
+            elif (
+                comp := os.environ.get(  # we're currently on a rig Acq computer
+                    "aibs_comp_id", None
+                )
+            ) and comp in [f"NP.{rig}-Acq" for rig in "012"]:
                 paths = self.acq_paths
         if paths is None and self.npexp_path:
             paths = [self.npexp_path]
@@ -308,7 +355,9 @@ class DataJointSession:
 
         # upload rest of raw data
         # ------------------------------------------------------- #
-        logging.getLogger('web_logger').info(f'Started uploading raw data {self.session_folder}')
+        logging.getLogger("web_logger").info(
+            f"Started uploading raw data {self.session_folder}"
+        )
         for local_path in local_session_paths_for_upload:
             dj_axon.upload_files(
                 source=local_path,
@@ -316,22 +365,35 @@ class DataJointSession:
                 session=S3_SESSION,
                 s3_bucket=S3_BUCKET,
                 boto3_config=BOTO3_CONFIG,
-                ignore_regex=".*\.oebin"+"|.*\.".join([' ']+[f'probe{letter}-.*' for letter in set(probes) ^ set(DEFAULT_PROBE_SET)]).strip(),
+                ignore_regex=".*\.oebin"
+                + "|.*\.".join(
+                    [" "]
+                    + [
+                        f"probe{letter}-.*"
+                        for letter in set(probes) ^ set(DEFAULT_PROBE_SET)
+                    ]
+                ).strip(),
             )
-        logging.getLogger('web_logger').info(f'Finished uploading raw data {self.session_folder}')
+        logging.getLogger("web_logger").info(
+            f"Finished uploading raw data {self.session_folder}"
+        )
 
     def download(self, wait_on_sorting=False):
         "Download small files from sorting to /workgroups/dynamicrouting/."
         if not self.sorting_finished and not wait_on_sorting:
-            logging.info(f"Sorting not started or incomplete for {self.session_folder}: skipping download.")
+            logging.info(
+                f"Sorting not started or incomplete for {self.session_folder}: skipping download."
+            )
             return
-        
+
         while not self.sorting_finished:
             wait_on_process(
                 sec=1800,
                 msg=f"Waiting for {self.session_folder} processing to complete to download sorted data...",
             )
-        logging.getLogger('web_logger').info(f'Downloading sorted data {self.session_folder}')
+        logging.getLogger("web_logger").info(
+            f"Downloading sorted data {self.session_folder}"
+        )
         dj_axon.download_files(
             source=self.remote_session_dir_outbox,
             destination=f"{self.local_download_path}\\",  # if using linux - this should be fwd slash
@@ -340,17 +402,21 @@ class DataJointSession:
             boto3_config=BOTO3_CONFIG,
             ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json\.*",
         )
-        logging.getLogger('web_logger').info(f'Finished downloading sorted data {self.local_download_path}')
-        
+        logging.getLogger("web_logger").info(
+            f"Finished downloading sorted data {self.local_download_path}"
+        )
+
     def sorting_summary(self):
         df = sorting_summary()
         return df.loc[[self.session_folder]].transpose()
-        
-    def create_session_entry(self,remote_oebin_path: pathlib.Path):
+
+    def create_session_entry(self, remote_oebin_path: pathlib.Path):
         "Insert metadata for session in datajoint tables"
-        
-        remote_session_dir_relative = pathlib.Path(self.session_folder) / remote_oebin_path.parent
-        
+
+        remote_session_dir_relative = (
+            pathlib.Path(self.session_folder) / remote_oebin_path.parent
+        )
+
         if dj_session.SessionDirectory & {"session_dir": self.session_folder}:
             print(f"Session entry already exists for {self.session_folder}")
 
@@ -677,18 +743,20 @@ def add_new_clustering_parameters(
     }
     dj_ephys.ClusteringParamSet.insert1(param_dict, skip_duplicates=True)
 
-def get_clustering_parameters(paramset_idx: int=KS_PARAMS_INDEX) -> Tuple[str, dict]:
+
+def get_clustering_parameters(paramset_idx: int = KS_PARAMS_INDEX) -> Tuple[str, dict]:
     "Get description and dict of parameters from paramset_idx."
     return (dj_ephys.ClusteringParamSet & {"paramset_idx": paramset_idx}).fetch1(
         "params"
-    )  
+    )
+
 
 def get_status_all_sessions():
     """Determine which tables have been autopopulated.
     Returns:
         A joined table indicating the number of entries several database tables starting at the session level.
     """
-    #* not much faster than getting all sessions:
+    # * not much faster than getting all sessions:
     # def get_status_all_sessions(sessions:str|int|Sequence|None=None):
 
     # if not sessions:
@@ -696,15 +764,15 @@ def get_status_all_sessions():
     # elif isinstance(sessions, str|int):
     #     if folder := get_session_folder(str(sessions)):
     #         sessions = folder.split('_')[0]
-    #     session_process_status = dj_session.Session & {'session_id': str(sessions)} 
+    #     session_process_status = dj_session.Session & {'session_id': str(sessions)}
     # else:
     #     session_process_status = (
-    #         dj_session.Session & 
+    #         dj_session.Session &
     #         # makes one large string, not working:
     #         ' & '.join(f'session_id={session}' for session in sessions)
     #     )
     session_process_status = dj_session.Session
-        
+
     session_process_status *= dj_session.Session.aggr(
         dj_ephys.ProbeInsertion, probes="count(insertion_number)", keep_all_rows=True
     )
@@ -736,115 +804,136 @@ def get_status_all_sessions():
         dj_ephys.WaveformSet, waveform="count(insertion_number)", keep_all_rows=True
     )
 
-    return session_process_status.proj(
-        ..., all_done="probes > 0 AND waveform = task"
-    )
-    
+    return session_process_status.proj(..., all_done="probes > 0 AND waveform = task")
+
+
 def sorting_summary() -> pd.DataFrame:
     df = pd.DataFrame(get_status_all_sessions())
     # make new 'session' column that matches our local session folder names
-    session_str_from_datajoint_keys = lambda x: x.session_id.astype(str) + "_" + x.subject + "_" + x.session_datetime.dt.strftime('%Y%m%d')
+    session_str_from_datajoint_keys = (
+        lambda x: x.session_id.astype(str)
+        + "_"
+        + x.subject
+        + "_"
+        + x.session_datetime.dt.strftime("%Y%m%d")
+    )
     df = df.assign(session=session_str_from_datajoint_keys)
     # filter for sessions with correctly formatted session/mouse/date keys
     df = df.loc[~(pd.Series(map(get_session_folder, df.session)).isnull())]
     df.set_index("session", inplace=True)
-    df.sort_values(by='session', ascending=False, inplace=True)
+    df.sort_values(by="session", ascending=False, inplace=True)
     # remove columns that were concatenated into the new 'session' column
     df.drop(columns=["session_id", "subject", "session_datetime", "lfp"], inplace=True)
     return df
 
+
 def sorted_sessions() -> Iterable[DataJointSession]:
     df = sorting_summary()
-    yield from (DataJointSession(session) for session in df.loc[df['all_done'] == 1].index)
+    yield from (
+        DataJointSession(session) for session in df.loc[df["all_done"] == 1].index
+    )
+
 
 def database_diagram() -> IPython.display.SVG:
-    diagram = dj.Diagram(dj_subject.Subject) + dj.Diagram(dj_session.Session) + dj.Diagram(dj_probe) + dj.Diagram(dj_ephys)
+    diagram = (
+        dj.Diagram(dj_subject.Subject)
+        + dj.Diagram(dj_session.Session)
+        + dj.Diagram(dj_probe)
+        + dj.Diagram(dj_ephys)
+    )
     return diagram.make_svg()
 
 
 def session_upload_from_acq_widget() -> ipw.AppLayout:
-    
-    folders = get_raw_ephys_subfolders(pathlib.Path('A:')) + get_raw_ephys_subfolders(pathlib.Path('B:'))
 
-    sessions = [get_session_folder(folder) for folder in folders if is_new_ephys_folder(folder)]
+    folders = get_raw_ephys_subfolders(pathlib.Path("A:")) + get_raw_ephys_subfolders(
+        pathlib.Path("B:")
+    )
+
+    sessions = [
+        get_session_folder(folder) for folder in folders if is_new_ephys_folder(folder)
+    ]
     for session in sessions:
         if sessions.count(session) < 2:
             sessions.remove(session)
     sessions = sorted(list(set(sessions)))
-    
-    probes_to_upload = 'ABCDEF'
-    
-    out = ipw.Output(layout={'border': '1px solid black'})
+
+    probes_to_upload = "ABCDEF"
+
+    out = ipw.Output(layout={"border": "1px solid black"})
 
     session_dropdown = ipw.Dropdown(
         options=sessions,
         value=None,
-        description='session',
+        description="session",
         disabled=False,
     )
-    
+
     upload_button = ipw.ToggleButton(
-        description='Upload',
+        description="Upload",
         disabled=True,
-        button_style='', # 'success', 'info', 'warning', 'danger' or ''
-        tooltip='Upload raw data to DataJoint',
-        icon="cloud-upload", # (FontAwesome names without the `fa-` prefix)
+        button_style="",  # 'success', 'info', 'warning', 'danger' or ''
+        tooltip="Upload raw data to DataJoint",
+        icon="cloud-upload",  # (FontAwesome names without the `fa-` prefix)
     )
-    
+
     progress_button = ipw.ToggleButton(
-        description='Check sorting',
+        description="Check sorting",
         disabled=True,
-        button_style='', # 'success', 'info', 'warning', 'danger' or ''
-        tooltip='Check sorting progress on DataJoint',
-        icon="hourglass-half", # (FontAwesome names without the `fa-` prefix)
+        button_style="",  # 'success', 'info', 'warning', 'danger' or ''
+        tooltip="Check sorting progress on DataJoint",
+        icon="hourglass-half",  # (FontAwesome names without the `fa-` prefix)
     )
-    
+
     def handle_dropdown_change(change):
         if get_session_folder(change.new) is not None:
             upload_button.disabled = False
-            upload_button.button_style = 'warning'
+            upload_button.button_style = "warning"
             progress_button.disabled = False
-            progress_button.button_style = 'info'
-    session_dropdown.observe(handle_dropdown_change, names='value')
-    
+            progress_button.button_style = "info"
+
+    session_dropdown.observe(handle_dropdown_change, names="value")
+
     def handle_upload_change(change):
         upload_button.disabled = True
-        upload_button.button_style = 'warning'       
+        upload_button.button_style = "warning"
         with out:
-            print(f'Uploading probes: {probes_from_grid()}')
+            print(f"Uploading probes: {probes_from_grid()}")
         session = DataJointSession(session_dropdown.value)
         session.upload(probes=probes_from_grid())
-        
-    upload_button.observe(handle_upload_change, names='value')
-    
+
+    upload_button.observe(handle_upload_change, names="value")
+
     def handle_progress_change(change):
         with out:
-            print('Fetching summary from DataJoint...')
-        progress_button.button_style=''
+            print("Fetching summary from DataJoint...")
+        progress_button.button_style = ""
         progress_button.disabled = True
         session = DataJointSession(session_dropdown.value)
         try:
             with out:
                 IPython.display.display(session.sorting_summary())
         except dj.DataJointError:
-            print(f'No entry found in DataJoint for session {session_dropdown.value}')
-    progress_button.observe(handle_progress_change, names='value')
-    
+            print(f"No entry found in DataJoint for session {session_dropdown.value}")
+
+    progress_button.observe(handle_progress_change, names="value")
+
     buttons = ipw.HBox([upload_button, progress_button])
-    
-    probe_select_grid = ipw.GridspecLayout(6,1,grid_gap="0px")
+
+    probe_select_grid = ipw.GridspecLayout(6, 1, grid_gap="0px")
     for idx, probe_letter in enumerate(probes_to_upload):
-        probe_select_grid[idx,0] = ipw.Checkbox(
+        probe_select_grid[idx, 0] = ipw.Checkbox(
             value=True,
-            description=f'probe{probe_letter}',
+            description=f"probe{probe_letter}",
             disabled=False,
             indent=True,
         )
+
     def probes_from_grid() -> str:
-        probe_letters = ''
+        probe_letters = ""
         for idx in range(6):
-            if probe_select_grid[idx,0].value == True:
-                probe_letters += chr(ord('A') + idx)
+            if probe_select_grid[idx, 0].value == True:
+                probe_letters += chr(ord("A") + idx)
         return probe_letters
 
     app = ipw.TwoByTwoLayout(
@@ -853,8 +942,13 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
         bottom_left=buttons,
         top_left=session_dropdown,
         width="100%",
-        justify_items='center',
-        align_items='center',
+        justify_items="center",
+        align_items="center",
     )
     IPython.display.display(app)
 
+
+if __name__ == "__main__":
+    session = DataJointSession("1222995723_632293_20221101")
+    session_upload_from_acq_widget()
+    session.upload(without_sorting=False)
