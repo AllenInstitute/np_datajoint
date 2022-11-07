@@ -1,4 +1,4 @@
-SET env=datajoint
+SET /p env=Conda environment name for datajoint tools:  
 
 CALL conda activate base
 CALL conda env remove -n %env% -y
