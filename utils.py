@@ -20,12 +20,7 @@ import djsciops.settings as dj_settings
 from mpetk import mpeconfig
 import pandas as pd
 import IPython
-
-# logging.basicConfig(level=logging.DEBUG, filename='upload.log', filemode='w')
-# os.environ["DJSCIOPS_LOG_LEVEL"] = "debug" #! not working
-# dj_settings.LOG_LEVEL = "debug" #! not working
-logger = dj.logger
-logger.setLevel('INFO')
+import ipywidgets as ipw
 
 # get zookeeper config -----------------------------------------------------------------
 zk_config = mpeconfig.source_configuration(
@@ -70,6 +65,7 @@ dj_session = dj.create_virtual_module("session", "mindscope_dynamic-routing_sess
 dj_ephys = dj.create_virtual_module("ephys", "mindscope_dynamic-routing_ephys")
 dj_probe = dj.create_virtual_module("probe", "mindscope_dynamic-routing_probe")
 
+DEFAULT_PROBE_SET = tuple('ABCDEF')
 
 class SessionDirNotFoundError(ValueError):
     pass
@@ -268,12 +264,17 @@ class DataJointSession:
             else:
                 dj_ephys.ClusteringTask.insert1(task_key, replace=True)
 
-    def upload(self, paths: Sequence[str | pathlib.Path] = None, upload_without_sorting=False):
+    def upload(
+        self,
+        probes:str=DEFAULT_PROBE_SET,
+        paths: Sequence[str | pathlib.Path] = None,
+        without_sorting=False):
         """Upload from rig/network share to DataJoint server.
 
         Accepts a list of paths to upload, or if None, will try to upload from A:/B:,
         then np-exp, then lims.
         """
+        
         if paths is None:
             if self.path is not None:
                 paths = [self.path]
@@ -287,12 +288,12 @@ class DataJointSession:
             raise ValueError("No paths to upload from")
 
         local_oebin_paths, remote_oebin_path = get_local_remote_oebin_paths(paths)
-        local_session_paths_for_upload = [
+        local_session_paths_for_upload = (
             p.parent.parent.parent for p in local_oebin_paths
-        ]
+        )
 
-        if not upload_without_sorting:
-            self.create_session_entry()
+        if not without_sorting:
+            self.create_session_entry(remote_oebin_path)
 
             # upload merged oebin file first
             # ------------------------------------------------------- #
@@ -315,7 +316,7 @@ class DataJointSession:
                 session=S3_SESSION,
                 s3_bucket=S3_BUCKET,
                 boto3_config=BOTO3_CONFIG,
-                ignore_regex=".*.oebin",
+                ignore_regex=".*\.oebin"+"|.*\.".join([' ']+[f'probe{letter}-.*' for letter in set(probes) ^ set(DEFAULT_PROBE_SET)]).strip(),
             )
         logging.getLogger('web_logger').info(f'Finished uploading raw data {self.session_folder}')
 
@@ -337,7 +338,7 @@ class DataJointSession:
             session=S3_SESSION,
             s3_bucket=S3_BUCKET,
             boto3_config=BOTO3_CONFIG,
-            ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json.*",
+            ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json\.*",
         )
         logging.getLogger('web_logger').info(f'Finished downloading sorted data {self.local_download_path}')
         
@@ -345,8 +346,11 @@ class DataJointSession:
         df = sorting_summary()
         return df.loc[[self.session_folder]].transpose()
         
-    def create_session_entry(self):
+    def create_session_entry(self,remote_oebin_path: pathlib.Path):
         "Insert metadata for session in datajoint tables"
+        
+        remote_session_dir_relative = pathlib.Path(self.session_folder) / remote_oebin_path.parent
+        
         if dj_session.SessionDirectory & {"session_dir": self.session_folder}:
             print(f"Session entry already exists for {self.session_folder}")
 
@@ -374,7 +378,7 @@ class DataJointSession:
                 {
                     "subject": self.mouse_id,
                     "session_id": self.session_id,
-                    "session_dir": self.remote_session_dir_relative,
+                    "session_dir": remote_session_dir_relative,
                 },
                 replace=True,
             )
@@ -756,3 +760,101 @@ def sorted_sessions() -> Iterable[DataJointSession]:
 def database_diagram() -> IPython.display.SVG:
     diagram = dj.Diagram(dj_subject.Subject) + dj.Diagram(dj_session.Session) + dj.Diagram(dj_probe) + dj.Diagram(dj_ephys)
     return diagram.make_svg()
+
+
+def session_upload_from_acq_widget() -> ipw.AppLayout:
+    
+    folders = get_raw_ephys_subfolders(pathlib.Path('A:')) + get_raw_ephys_subfolders(pathlib.Path('B:'))
+
+    sessions = [get_session_folder(folder) for folder in folders if is_new_ephys_folder(folder)]
+    for session in sessions:
+        if sessions.count(session) < 2:
+            sessions.remove(session)
+    sessions = sorted(list(set(sessions)))
+    
+    probes_to_upload = 'ABCDEF'
+    
+    out = ipw.Output(layout={'border': '1px solid black'})
+
+    session_dropdown = ipw.Dropdown(
+        options=sessions,
+        value=None,
+        description='session',
+        disabled=False,
+    )
+    
+    upload_button = ipw.ToggleButton(
+        description='Upload',
+        disabled=True,
+        button_style='', # 'success', 'info', 'warning', 'danger' or ''
+        tooltip='Upload raw data to DataJoint',
+        icon="cloud-upload", # (FontAwesome names without the `fa-` prefix)
+    )
+    
+    progress_button = ipw.ToggleButton(
+        description='Check sorting',
+        disabled=True,
+        button_style='', # 'success', 'info', 'warning', 'danger' or ''
+        tooltip='Check sorting progress on DataJoint',
+        icon="hourglass-half", # (FontAwesome names without the `fa-` prefix)
+    )
+    
+    def handle_dropdown_change(change):
+        if get_session_folder(change.new) is not None:
+            upload_button.disabled = False
+            upload_button.button_style = 'warning'
+            progress_button.disabled = False
+            progress_button.button_style = 'info'
+    session_dropdown.observe(handle_dropdown_change, names='value')
+    
+    def handle_upload_change(change):
+        upload_button.disabled = True
+        upload_button.button_style = 'warning'       
+        with out:
+            print(f'Uploading probes: {probes_from_grid()}')
+        session = DataJointSession(session_dropdown.value)
+        session.upload(probes=probes_from_grid())
+        
+    upload_button.observe(handle_upload_change, names='value')
+    
+    def handle_progress_change(change):
+        with out:
+            print('Fetching summary from DataJoint...')
+        progress_button.button_style=''
+        progress_button.disabled = True
+        session = DataJointSession(session_dropdown.value)
+        try:
+            with out:
+                IPython.display.display(session.sorting_summary())
+        except dj.DataJointError:
+            print(f'No entry found in DataJoint for session {session_dropdown.value}')
+    progress_button.observe(handle_progress_change, names='value')
+    
+    buttons = ipw.HBox([upload_button, progress_button])
+    
+    probe_select_grid = ipw.GridspecLayout(6,1,grid_gap="0px")
+    for idx, probe_letter in enumerate(probes_to_upload):
+        probe_select_grid[idx,0] = ipw.Checkbox(
+            value=True,
+            description=f'probe{probe_letter}',
+            disabled=False,
+            indent=True,
+        )
+    def probes_from_grid() -> str:
+        probe_letters = ''
+        for idx in range(6):
+            if probe_select_grid[idx,0].value == True:
+                probe_letters += chr(ord('A') + idx)
+        return probe_letters
+
+    app = ipw.TwoByTwoLayout(
+        top_right=probe_select_grid,
+        bottom_right=out,
+        bottom_left=buttons,
+        top_left=session_dropdown,
+        width="100%",
+        justify_items='center',
+        align_items='center',
+    )
+    IPython.display.display(app)
+
