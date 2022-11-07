@@ -706,11 +706,11 @@ def get_status_all_sessions():
     session_process_status = dj_session.Session
         
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.ProbeInsertion, insertion="count(insertion_number)", keep_all_rows=True
+        dj_ephys.ProbeInsertion, probes="count(insertion_number)", keep_all_rows=True
     )
     session_process_status *= dj_session.Session.aggr(
         dj_ephys.EphysRecording,
-        ephys_recording="count(insertion_number)",
+        ephys="count(insertion_number)",
         keep_all_rows=True,
     )
     session_process_status *= dj_session.Session.aggr(
@@ -718,7 +718,7 @@ def get_status_all_sessions():
     )
     session_process_status *= dj_session.Session.aggr(
         dj_ephys.ClusteringTask,
-        clustering_task="count(insertion_number)",
+        task="count(insertion_number)",
         keep_all_rows=True,
     )
     session_process_status *= dj_session.Session.aggr(
@@ -726,18 +726,18 @@ def get_status_all_sessions():
     )
     session_process_status *= dj_session.Session.aggr(
         dj_ephys.CuratedClustering,
-        curated_clustering="count(insertion_number)",
+        curated="count(insertion_number)",
         keep_all_rows=True,
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.QualityMetrics, qc_metrics="count(insertion_number)", keep_all_rows=True
+        dj_ephys.QualityMetrics, metrics="count(insertion_number)", keep_all_rows=True
     )
     session_process_status *= dj_session.Session.aggr(
         dj_ephys.WaveformSet, waveform="count(insertion_number)", keep_all_rows=True
     )
 
     return session_process_status.proj(
-        ..., all_done="insertion > 0 AND waveform = clustering_task"
+        ..., all_done="probes > 0 AND waveform = task"
     )
     
 def sorting_summary() -> pd.DataFrame:
@@ -750,7 +750,7 @@ def sorting_summary() -> pd.DataFrame:
     df.set_index("session", inplace=True)
     df.sort_values(by='session', ascending=False, inplace=True)
     # remove columns that were concatenated into the new 'session' column
-    df.drop(columns=["session_id", "subject", "session_datetime"], inplace=True)
+    df.drop(columns=["session_id", "subject", "session_datetime", "lfp"], inplace=True)
     return df
 
 def sorted_sessions() -> Iterable[DataJointSession]:
