@@ -1,9 +1,13 @@
---extra-index-url http://aibspi:3141/aibs/packages
---trusted-host aibspi
---extra-index-url https://pypi.org/simple
-mpeconfig
-djsciops 
-datajoint
+--index-url https://pypi.org/simple
+setuptools
+cython
+pyzmq
+ipykernel
+ipython
 jupyter
 mypy
 black
+seaborn
+pandas
+djsciops 
+datajoint
