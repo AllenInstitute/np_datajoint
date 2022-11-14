@@ -71,7 +71,7 @@ KS_PARAMS_INDEX: int = zk_config["sorting"][
     "default_kilosort_parameter_set_index"
 ]  # 1=KS 2.0, 2=KS 2.5
 
-# create virtual datajoin modules for querying tables ---------------------------------- #
+# create virtual datajoint modules for querying tables ---------------------------------- #
 dj_subject = dj.create_virtual_module("subject", "mindscope_dynamic-routing_subject")
 dj_session = dj.create_virtual_module("session", "mindscope_dynamic-routing_session")
 dj_ephys = dj.create_virtual_module("ephys", "mindscope_dynamic-routing_ephys")
