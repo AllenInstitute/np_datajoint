@@ -77,7 +77,7 @@ dj_session = dj.create_virtual_module("session", "mindscope_dynamic-routing_sess
 dj_ephys = dj.create_virtual_module("ephys", "mindscope_dynamic-routing_ephys")
 dj_probe = dj.create_virtual_module("probe", "mindscope_dynamic-routing_probe")
 
-DEFAULT_PROBE_SET = tuple("ABCDEF")
+DEFAULT_PROBES = "ABCDEF"
 
 
 class SessionDirNotFoundError(ValueError):
@@ -310,7 +310,7 @@ class DataJointSession:
 
     def upload(
         self,
-        probes: str = DEFAULT_PROBE_SET,
+        probes: str = DEFAULT_PROBES,
         paths: Sequence[str | pathlib.Path] = None,
         without_sorting=False,
     ):
@@ -370,7 +370,7 @@ class DataJointSession:
                     [" "]
                     + [
                         f"probe{letter}-.*"
-                        for letter in set(probes) ^ set(DEFAULT_PROBE_SET)
+                        for letter in set(DEFAULT_PROBES) - set(probes)
                     ]
                 ).strip(),
             )
