@@ -338,7 +338,7 @@ class DataJointSession:
             temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths)
             dj_axon.upload_files(
                 source=temp_merged_oebin_path,
-                destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.as_posix()}/",
+                destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.parent.as_posix()}/",
                 session=S3_SESSION,
                 s3_bucket=S3_BUCKET,
             )
@@ -434,7 +434,7 @@ class DataJointSession:
                 {
                     "subject": self.mouse_id,
                     "session_id": self.session_id,
-                    "session_dir": remote_session_dir_relative,
+                    "session_dir": remote_session_dir_relative, #?! possible change: str(remote_session_dir_relative)+'/'
                 },
                 replace=True,
             )
