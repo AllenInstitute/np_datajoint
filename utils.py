@@ -18,34 +18,24 @@ import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
 import djsciops.settings as dj_settings
 from mpetk import mpeconfig
+import np_logging
 import pandas as pd
 import IPython
 import ipywidgets as ipw
 
-# get zookeeper config -----------------------------------------------------------------
-# zk_config = mpeconfig.source_configuration(
-#     project_name="datajoint",
-#     hosts="eng-mindscope:2181",
-#     rig_id=os.environ.get("aibs_rig_id", os.environ.get("COMPUTERNAME")),
-#     comp_id=os.environ.get("aibs_comp_id", os.environ.get("COMPUTERNAME")),
-#     fetch_logging_config=False,
-#     send_start_log=False,
-# )
-## alternative method to get a specific config by its path
-with mpeconfig.ConfigServer(hosts="eng-mindscope:2181") as zk:
-    zk_config = mpeconfig.fetch_configuration(
-        server=zk,
-        config_path="/projects/datajoint/defaults/configuration",
-        required=True,
-    )
+np_logging.setup(
+    config = np_logging.fetch_zk_config("/projects/datajoint/defaults/logging"),    
+)
 
-#! this section isn't working
-# datajoint's logging is overwritten by mpeconfig, so we fwd dj msgs to mpe handlers
-# dj_log = logging.getLogger("Primary")
-# dj_log.handlers = dj.logger.handlers = logging.getLogger().handlers
-# dj_log.propagate = dj.logger.propagate = False
+# # replace datajoint's logging with ours
+# for log_name in ("Primary", 'datajoint'): # all datajoint packages 
+#     logging.getLogger(log_name).__dict__ = logging.getLogger().__dict__
+    
+# config ------------------------------------------------------------------------------
+# get zookeeper config via np_logging
+zk_config = np_logging.fetch_zk_config("/projects/datajoint/defaults/configuration")
 
-# apply zookeeper config to datajoint session
+# configure datajoint session
 dj.config.update(
     zk_config["datajoint"]
 )  # dj.config is a custom class behaving as a dict - don't directly assign a dict
@@ -247,7 +237,7 @@ class DataJointSession:
     ):
         "For existing entries in dj_ephys.EphysRecording, create a new ClusteringTask with the specified `paramset_idx`"
         if not self.probe_insertion:
-            print(
+            logging.info(
                 f"Probe insertions have not been auto-populated for {self.session_folder} - cannot add additional clustering task yet."
             )
             return
@@ -271,7 +261,7 @@ class DataJointSession:
                     msg = f"ProbeInsertion entry already exists - ClusteringTask should be auto-populated soon."
                 else:
                     msg = f"ProbeInsertion and ClusteringTask entries don't exist - either metadata/critical files are missing, or processing hasn't started yet."
-                print(
+                logging.info(
                     f"Skipping ClusteringTask entry for {self.session_folder}_probe{probe_letter}: {msg}"
                 )
                 continue
@@ -303,7 +293,7 @@ class DataJointSession:
             }
 
             if dj_ephys.ClusteringTask & task_key:
-                dj.logger.info(f"Clustering task already exists: {task_key}")
+                logging.info(f"Clustering task already exists: {task_key}")
                 return
             else:
                 dj_ephys.ClusteringTask.insert1(task_key, replace=True)
@@ -418,7 +408,7 @@ class DataJointSession:
         )
 
         if dj_session.SessionDirectory & {"session_dir": self.session_folder}:
-            print(f"Session entry already exists for {self.session_folder}")
+            logging.info(f"Session entry already exists for {self.session_folder}")
 
         if not dj_subject.Subject & {"subject": self.mouse_id}:
             # insert new subject
@@ -613,7 +603,7 @@ def get_local_remote_oebin_paths(
             break  # we're done anyway, just making this clear
 
         if ephys_subfolders:
-            print(f"multiple paths supplied, with subfolders of raw data: {paths}")
+            logging.warning(f"Multiple subfolders of raw data found in {path} - expected a single folder.")
             local_session_paths.update(e for e in ephys_subfolders)
             continue
 
@@ -898,7 +888,7 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
         upload_button.disabled = True
         upload_button.button_style = "warning"
         with out:
-            print(f"Uploading probes: {probes_from_grid()}")
+            logging.info(f"Uploading probes: {probes_from_grid()}")
         session = DataJointSession(session_dropdown.value)
         session.upload(probes=probes_from_grid())
 
@@ -906,7 +896,7 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
 
     def handle_progress_change(change):
         with out:
-            print("Fetching summary from DataJoint...")
+            logging.info("Fetching summary from DataJoint...")
         progress_button.button_style = ""
         progress_button.disabled = True
         session = DataJointSession(session_dropdown.value)
@@ -914,7 +904,7 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
             with out:
                 IPython.display.display(session.sorting_summary())
         except dj.DataJointError:
-            print(f"No entry found in DataJoint for session {session_dropdown.value}")
+            logging.info(f"No entry found in DataJoint for session {session_dropdown.value}")
 
     progress_button.observe(handle_progress_change, names="value")
 

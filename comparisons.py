@@ -72,18 +72,18 @@ class Probe:
         metric:str, 
         ax:plt.Axes=None, 
         **kwargs
-        ) -> plt.Axes:
+        ) -> plt.Axes | None:
         if not self.metrics_csv.exists():
-            print("No metrics.csv file found")
+            logging.info(f"No metrics.csv file found for {self:!r}")
             return None
         if 'quality' not in self.metrics_df.columns:
-            print("No quality column in metrics")
+            logging.info(f"No quality column in metrics for {self:!r}")
             return None
         if all(self.metrics_df['quality'] == 'noise'):
-            print("All clusters are noise")
+            logging.info(f"All clusters are noise for {self:!r}")
             return None
         if len(self.metrics_df.loc[self.metrics_df['quality']=='good']) == 1:
-            print("Only one good cluster")
+            logging.info(f"Only one good cluster for {self:!r}")
             return None
         if ax is None:
             fig, ax = plt.subplots()
