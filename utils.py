@@ -300,26 +300,26 @@ class DataJointSession:
 
     def upload(
         self,
-        probes: str = DEFAULT_PROBES,
+        probes: Sequence[str] = DEFAULT_PROBE_SET,
         paths: Sequence[str | pathlib.Path] = None,
         without_sorting=False,
     ):
         """Upload from rig/network share to DataJoint server.
 
-        Accepts a list of paths to upload, or if None, will try to upload from A:/B:,
-        then np-exp, then lims.
+        Accepts a list of paths to upload or, if None, will try to upload from A:/B:,
+        then np-exp.
         """
 
         if paths is None:
             if self.path is not None:
                 paths = [self.path]
             elif (
-                comp := os.environ.get(  # we're currently on a rig Acq computer
+                comp := os.environ.get(  
                     "aibs_comp_id", None
                 )
             ) and comp in [f"NP.{rig}-Acq" for rig in "012"]:
-                paths = self.acq_paths
-        if paths is None and self.npexp_path:
+                paths = self.acq_paths # we're currently on a rig Acq computer
+        if not paths and self.npexp_path is not None:
             paths = [self.npexp_path]
         if paths is None:
             raise ValueError("No paths to upload from")
@@ -404,7 +404,7 @@ class DataJointSession:
         "Insert metadata for session in datajoint tables"
 
         remote_session_dir_relative = (
-            pathlib.Path(self.session_folder) / remote_oebin_path.parent
+            pathlib.Path(self.session_folder) / remote_oebin_path.parent 
         )
 
         if dj_session.SessionDirectory & {"session_dir": self.session_folder}:
