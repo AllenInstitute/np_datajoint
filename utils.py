@@ -324,7 +324,9 @@ class DataJointSession:
         for path in (paths, self.path, self.acq_paths, self.lims_path, self.npexp_path):
             if not path:
                 continue
-            matching_session_folders = tuple(itertools.chain(p.glob(f"{self.session_folder}_probe*") for p in path))
+            if not isinstance(path, Sequence):
+                path = (path,)
+            matching_session_folders = {s for p in path for s in get_raw_ephys_subfolders(p)}
             if is_valid_pair_split_ephys_folders(matching_session_folders):
                 return matching_session_folders
     
@@ -508,6 +510,8 @@ def is_valid_ephys_folder(path: pathlib.Path) -> bool:
 
 def is_valid_pair_split_ephys_folders(paths: Sequence[pathlib.Path]) -> bool:
     "Check a pair of dirs of raw data for size, matching settings.xml, v0.6.x+ to confirm they're from the same session and meet expected criteria."
+    if not paths:
+        return False
     
     if any(not is_valid_ephys_folder(path) for path in paths):
         return False
@@ -516,7 +520,7 @@ def is_valid_pair_split_ephys_folders(paths: Sequence[pathlib.Path]) -> bool:
     check_xml_files_match([tuple(path.rglob("settings*.xml"))[0] for path in paths])
     
     size_difference_threshold_gb = 2
-    dir_sizes_gb = (
+    dir_sizes_gb = tuple(
         round(dir_size(path)/ 1024**3)
         for path in paths
         )
