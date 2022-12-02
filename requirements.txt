@@ -1,7 +1,6 @@
 --index-url https://pypi.org/simple
-setuptools
-cython
-pyzmq
+djsciops 
+datajoint
 ipykernel
 ipython
 jupyter
@@ -9,5 +8,4 @@ mypy
 black
 seaborn
 pandas
-djsciops 
-datajoint
+np_logging
