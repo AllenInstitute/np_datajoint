@@ -351,7 +351,7 @@ class DataJointSession:
 
             # upload merged oebin file first
             # ------------------------------------------------------- #
-            temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths)
+            temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths, probes)
             dj_axon.upload_files(
                 source=temp_merged_oebin_path,
                 destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.parent.as_posix()}/",
@@ -691,6 +691,8 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path], probes:Sequence[str]
     """
     if isinstance(paths, pathlib.Path):
         return paths
+    if any(not p.suffix == ".oebin" for p in paths):
+        raise ValueError("Not all paths are .oebin files")
     if (
         len(paths) == 1
         and isinstance(paths[0], pathlib.Path)
@@ -702,36 +704,35 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path], probes:Sequence[str]
     check_xml_files_match(
         [p / "settings.xml" for p in [o.parent.parent.parent for o in paths]]
     )
+    
+    logging.debug(f"Creating merged oebin file with {probes=} from {paths}")
     merged_oebin: dict = {}
-    for oebin in paths:
+    for oebin in sorted(paths):
 
         with open(oebin, "r") as f:
             oebin_data = json.load(f)
 
-        if not merged_oebin:
-            merged_oebin = oebin_data
-            continue
-
         for key in oebin_data:
 
-            if merged_oebin[key] == oebin_data[key]:
+            if merged_oebin.get(key,None) == oebin_data[key]:
                 continue
 
             # 'continuous', 'events', 'spikes' are lists, which we want to concatenate across files
             if isinstance(oebin_data[key], List):
-                for idx, item in enumerate(oebin_data[key]):
-                    if merged_oebin[key][idx] == item:
+                for item in oebin_data[key]:
+                    if merged_oebin.get(key,None) and item in merged_oebin[key]:
                         continue
                     # skip probes not specified in input args (ie. not inserted)
                     if 'probe' in item.get('folder_name',''): # one is folder_name:'MessageCenter'
                         if not any(f'probe{letter}' in item['folder_name'] for letter in probes):
                             continue
+                    if merged_oebin.get(key, None) is None:
+                        merged_oebin[key] = [item]
                     else:
                         merged_oebin[key].append(item)
 
     if not merged_oebin:
         raise ValueError("No data found in structure.oebin files")
-
     merged_oebin_path = pathlib.Path(tempfile.gettempdir()) / "structure.oebin"
     with open(str(merged_oebin_path), "w") as f:
         json.dump(merged_oebin, f, indent=4)
