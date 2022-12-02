@@ -362,7 +362,7 @@ class DataJointSession:
 
         # upload rest of raw data
         # ------------------------------------------------------- #
-        logging.getLogger("web_logger").info(
+        logging.getLogger("web").info(
             f"Started uploading raw data {self.session_folder}"
         )
         for local_path in local_session_paths_for_upload:
@@ -381,7 +381,7 @@ class DataJointSession:
                     ]
                 ).strip(),
             )
-        logging.getLogger("web_logger").info(
+        logging.getLogger("web").info(
             f"Finished uploading raw data {self.session_folder}"
         )
 
@@ -398,7 +398,7 @@ class DataJointSession:
                 sec=1800,
                 msg=f"Waiting for {self.session_folder} processing to complete to download sorted data...",
             )
-        logging.getLogger("web_logger").info(
+        logging.getLogger("web").info(
             f"Downloading sorted data {self.session_folder}"
         )
         dj_axon.download_files(
@@ -409,7 +409,7 @@ class DataJointSession:
             boto3_config=BOTO3_CONFIG,
             ignore_regex=R".*\.dat|.*\.mat|.*\.npy|.*\.json\.*",
         )
-        logging.getLogger("web_logger").info(
+        logging.getLogger("web").info(
             f"Finished downloading sorted data {self.local_download_path}"
         )
 
