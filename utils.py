@@ -1005,5 +1005,6 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
 
 if __name__ == "__main__":
     session = DataJointSession("1222995723_632293_20221101")
-    session_upload_from_acq_widget()
-    session.upload(without_sorting=False)
+    session.metrics
+    # session_upload_from_acq_widget()
+    # session.upload(without_sorting=False)
