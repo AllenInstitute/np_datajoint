@@ -351,7 +351,6 @@ class DataJointSession:
 
             # upload merged oebin file first
             # ------------------------------------------------------- #
-            # axon upload won't allow us to overwrite an existing file
             temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths)
             dj_axon.upload_files(
                 source=temp_merged_oebin_path,
@@ -365,6 +364,14 @@ class DataJointSession:
         logging.getLogger("web").info(
             f"Started uploading raw data {self.session_folder}"
         )
+        ignore_regex = ".*\.oebin"
+        ignore_regex += "|.*\.".join(
+                    [" "]
+                    + [
+                        f"probe{letter}-.*"
+                        for letter in set(DEFAULT_PROBES) - set(probes)
+                    ]
+                ).strip()
         for local_path in local_session_paths_for_upload:
             dj_axon.upload_files(
                 source=local_path,
@@ -372,14 +379,7 @@ class DataJointSession:
                 session=S3_SESSION,
                 s3_bucket=S3_BUCKET,
                 boto3_config=BOTO3_CONFIG,
-                ignore_regex=".*\.oebin"
-                + "|.*\.".join(
-                    [" "]
-                    + [
-                        f"probe{letter}-.*"
-                        for letter in set(DEFAULT_PROBES) - set(probes)
-                    ]
-                ).strip(),
+                ignore_regex=ignore_regex,
             )
         logging.getLogger("web").info(
             f"Finished uploading raw data {self.session_folder}"
