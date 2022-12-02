@@ -451,7 +451,7 @@ class DataJointSession:
                 {
                     "subject": self.mouse_id,
                     "session_id": self.session_id,
-                    "session_dir": remote_session_dir_relative, #?! possible change: str(remote_session_dir_relative)+'/'
+                    "session_dir": remote_session_dir_relative.as_posix() + '/',
                 },
                 replace=True,
             )
