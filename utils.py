@@ -1,5 +1,7 @@
 import datetime
+import functools
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -9,7 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
-from typing import List, Sequence, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 from collections.abc import Iterable
 from typing import Generator
 
@@ -17,11 +19,11 @@ import datajoint as dj
 import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
 import djsciops.settings as dj_settings
-from mpetk import mpeconfig
 import np_logging
 import pandas as pd
 import IPython
 import ipywidgets as ipw
+import requests
 
 np_logging.setup(
     config = np_logging.fetch_zk_config("/projects/datajoint/defaults/logging"),    
