@@ -796,8 +796,9 @@ def get_clustering_parameters(paramset_idx: int = DEFAULT_KS_PARAMS_INDEX) -> Tu
         "params"
     )
 
-def all_sessions() -> dj.schemas:
+def all_sessions() -> dj.schemas.Session:
     "Correctly formatted sessions on Datajoint."
+    logging.debug("Fetching all correctly-formatted sessions from DataJoint server")
     all_sessions = dj_session.Session.fetch()
     session_str_match_on_datajoint = (
         lambda x: bool(get_session_folder(
@@ -805,30 +806,21 @@ def all_sessions() -> dj.schemas:
     )))
     return dj_session.Session & all_sessions[list(map(session_str_match_on_datajoint, all_sessions))]    
 
-def get_status_all_sessions(paramset_idx:int=DEFAULT_KS_PARAMS_INDEX):
-    """Determine which tables have been autopopulated - from Thinh@DJ.
+def get_status_all_sessions(paramset_idx: Optional[int] = DEFAULT_KS_PARAMS_INDEX) -> dj.schemas.Session:
+    """Summary of processing for all sessions, with optional restriction on paramset_idx - modified from Thinh@DJ.
     
-    A table indicating the number of entries in each of several database tables,
-    starting at the session level.
-    
-    Can be restricted with an additional query.
+        Table is returned, can be further restricted with queries.
     """
-    # * not much faster than getting all sessions:
-    # def get_status_all_sessions(sessions:str|int|Sequence|None=None):
-
-    # if not sessions:
-    #     session_process_status = dj_session.Session
-    # elif isinstance(sessions, str|int):
-    #     if folder := get_session_folder(str(sessions)):
-    #         sessions = folder.split('_')[0]
-    #     session_process_status = dj_session.Session & {'session_id': str(sessions)}
-    # else:
-    #     session_process_status = (
-    #         dj_session.Session &
-    #         # makes one large string, not working:
-    #         ' & '.join(f'session_id={session}' for session in sessions)
-    #     )
+    
+    def paramset_restricted(schema: dj.schemas.Schema) -> dj.schemas.Schema:
+        if paramset_idx is None:
+            return schema
+        else:
+            return schema & {'paramset_idx':paramset_idx}
+        
     session_process_status = all_sessions()
+    
+    logging.debug(f'Restricting processing status summary to sessions with paramset_idx={paramset_idx if paramset_idx is not None else "all"}')
 
     session_process_status *= dj_session.Session.aggr(
         dj_ephys.ProbeInsertion, probes="count(insertion_number)", keep_all_rows=True
@@ -842,27 +834,35 @@ def get_status_all_sessions(paramset_idx:int=DEFAULT_KS_PARAMS_INDEX):
         keep_all_rows=True,
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.LFP, lfp="count(insertion_number)", keep_all_rows=True
+        dj_ephys.LFP,
+        lfp="count(insertion_number)",
+        keep_all_rows=True
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.ClusteringTask & {"paramset_idx":paramset_idx},
+        paramset_restricted(dj_ephys.ClusteringTask),
         task="count(insertion_number)",
         keep_all_rows=True,
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.Clustering  & {"paramset_idx":paramset_idx}, clustering="count(insertion_number)", keep_all_rows=True
+        paramset_restricted(dj_ephys.Clustering), 
+        clustering="count(insertion_number)", 
+        keep_all_rows=True
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.CuratedClustering & {"paramset_idx":paramset_idx},
+        paramset_restricted(dj_ephys.CuratedClustering),
         curated="count(insertion_number)",
         pidx='GROUP_CONCAT(insertion_number SEPARATOR ", ")',
         keep_all_rows=True,
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.QualityMetrics  & {"paramset_idx":paramset_idx}, metrics="count(insertion_number)", keep_all_rows=True
+        paramset_restricted(dj_ephys.QualityMetrics), 
+        metrics="count(insertion_number)", 
+        keep_all_rows=True
     )
     session_process_status *= dj_session.Session.aggr(
-        dj_ephys.WaveformSet  & {"paramset_idx":paramset_idx}, waveform="count(insertion_number)", keep_all_rows=True
+        paramset_restricted(dj_ephys.WaveformSet), 
+        waveform="count(insertion_number)", 
+        keep_all_rows=True
     )
 
     return session_process_status.proj(..., all_done="probes > 0 AND waveform = task")
