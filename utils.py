@@ -310,32 +310,36 @@ class DataJointSession:
                 return
             else:
                 dj_ephys.ClusteringTask.insert1(task_key, replace=True)
-
+        
+    def get_raw_ephys_paths(self, paths: Optional[Sequence[str | pathlib.Path]] = None) -> tuple[pathlib.Path,...]:
+        """Return paths to the session's ephys data.
+            The first match is returned from:
+            1) paths specified in input arg,
+            2) self.path
+            3) A:/B: drives if running from an Acq computer
+            4) session folder on lims
+            5) session folder on npexp (should be careful with older sessions where data
+                may have been deleted)
+        """
+        for path in (paths, self.path, self.acq_paths, self.lims_path, self.npexp_path):
+            if not path:
+                continue
+            matching_session_folders = tuple(itertools.chain(p.glob(f"{self.session_folder}_probe*") for p in path))
+            if is_valid_pair_split_ephys_folders(matching_session_folders):
+                return matching_session_folders
+    
     def upload(
         self,
-        probes: Sequence[str] = DEFAULT_PROBE_SET,
-        paths: Sequence[str | pathlib.Path] = None,
+        probes: Sequence[str] = DEFAULT_PROBES,
+        paths: Optional[Sequence[str | pathlib.Path]] = None,
         without_sorting=False,
     ):
         """Upload from rig/network share to DataJoint server.
 
-        Accepts a list of paths to upload or, if None, will try to upload from A:/B:,
-        then np-exp.
+        Accepts a list of paths to upload, or if None, will try to upload from self.path,
+        then A:/B:, then lims, then npexp.
         """
-
-        if paths is None:
-            if self.path is not None:
-                paths = [self.path]
-            elif (
-                comp := os.environ.get(  
-                    "aibs_comp_id", None
-                )
-            ) and comp in [f"NP.{rig}-Acq" for rig in "012"]:
-                paths = self.acq_paths # we're currently on a rig Acq computer
-        if not paths and self.npexp_path is not None:
-            paths = [self.npexp_path]
-        if paths is None:
-            raise ValueError("No paths to upload from")
+        paths = self.get_raw_ephys_paths(paths)
 
         local_oebin_paths, remote_oebin_path = get_local_remote_oebin_paths(paths)
         local_session_paths_for_upload = (
@@ -468,7 +472,7 @@ def get_session_folder(path: str | pathlib.Path) -> str | None:
         return session_folders[0]
     return None
 
-
+@functools.cache
 def dir_size(path: pathlib.Path) -> int:
     """Return the size of a directory in bytes"""
     if not path.is_dir():
@@ -486,15 +490,46 @@ def dir_size(path: pathlib.Path) -> int:
 def is_new_ephys_folder(path: pathlib.Path) -> bool:
     "Look for hallmarks of a v0.6.x Open Ephys recording"
     return bool(
-        list(path.rglob("Record Node*"))
-        and list(path.rglob("structure.oebin"))
-        and list(path.rglob("settings*.xml"))
-        and list(path.rglob("continuous.dat"))
+        tuple(path.rglob("Record Node*"))
+        and tuple(path.rglob("structure.oebin"))
+        and tuple(path.rglob("settings*.xml"))
+        and tuple(path.rglob("continuous.dat"))
     )
+    
+def is_valid_ephys_folder(path: pathlib.Path) -> bool:
+    "Check a single dir of raw data for size, v0.6.x+ Open Ephys for DataJoint."
+    if not path.is_dir():
+        return False
+    if not is_new_ephys_folder(path):
+        return False
+    if not dir_size(path) > 275*1024**3: # GB
+        return False
+    return True
 
+def is_valid_pair_split_ephys_folders(paths: Sequence[pathlib.Path]) -> bool:
+    "Check a pair of dirs of raw data for size, matching settings.xml, v0.6.x+ to confirm they're from the same session and meet expected criteria."
+    
+    if any(not is_valid_ephys_folder(path) for path in paths):
+        return False
+    
+    check_session_paths_match(paths)
+    check_xml_files_match([tuple(path.rglob("settings*.xml"))[0] for path in paths])
+    
+    size_difference_threshold_gb = 2
+    dir_sizes_gb = (
+        round(dir_size(path)/ 1024**3)
+        for path in paths
+        )
+    diffs = (abs(dir_sizes_gb[0] - size) for size in dir_sizes_gb)
+    if not all(diff <= size_difference_threshold_gb for diff in diffs):
+        print(f"raw data folders are not within {size_difference_threshold_gb} GB of each other")
+        return False
+    
+    return True
 
 def get_raw_ephys_subfolders(path: pathlib.Path) -> List[pathlib.Path]:
-    """Return a list of raw ephys recording folders, defined as the root that Open Ephys
+    """
+    Return a list of raw ephys recording folders, defined as the root that Open Ephys
     records to, e.g. `A:/1233245678_366122_20220618_probeABC`.
 
     Does not include the path supplied itself - only subfolders
@@ -574,13 +609,21 @@ def check_xml_files_match(paths: Sequence[pathlib.Path]):
     if not all(c == checksums[0] for c in checksums):
         raise ValueError("XML files do not match")
 
+def check_session_paths_match(paths: Sequence[pathlib.Path]):
+    sessions = [get_session_folder(path) for path in paths]
+    if any(not s for s in sessions):
+        raise ValueError(
+            "Paths supplied must be session folders: [8+digit lims session ID]_[6-digit mouse ID]_[6-digit datestr]"
+        )
+    if not all(s and s == sessions[0] for s in sessions):
+        raise ValueError("Paths must all be for the same session")
 
 def get_local_remote_oebin_paths(
     paths: pathlib.Path | Sequence[pathlib.Path],
 ) -> Tuple[Sequence[pathlib.Path], pathlib.Path]:
     """Input one or more paths to raw data folders that exist locally for a single
     session, and get back the path to the `structure.oebin` files for each local folder
-    and the expected relative path on the remote server.
+    and its expected relative path on the remote server.
 
     A processing session on DataJoint needs pointing to a single structure.oebin file,
     via the SessionDirectory table and `session_dir` key.
@@ -592,18 +635,9 @@ def get_local_remote_oebin_paths(
     if isinstance(paths, pathlib.Path):
         paths = (paths,)
 
-    def check_session_paths(paths: Sequence[pathlib.Path]):
-        sessions = [get_session_folder(path) for path in paths]
-        if any(not s for s in sessions):
-            raise ValueError(
-                "Paths supplied must be session folders: [8+digit lims session ID]_[6-digit mouse ID]_[6-digit datestr]"
-            )
-        if not all(s and s == sessions[0] for s in sessions):
-            raise ValueError("Paths must all be for the same session")
-
     if not any(is_new_ephys_folder(path) for path in paths):
         raise ValueError("No new ephys folder found in paths")
-    check_session_paths(paths)
+    check_session_paths_match(paths)
 
     local_session_paths: Set[pathlib.Path] = set()
     for path in paths:
@@ -635,7 +669,7 @@ def get_local_remote_oebin_paths(
 
     # Here we make a new relative path for the server with everything between the
     # session_dir 'root' folder and two levels above the 'structure.oebin' file, which contains the
-    # settings.xml file (the same for _probeABC and _probeDEF)
+    # settings.xml file (the same settings.xml for both _probeABC and _probeDEF)
     local_session_paths_for_upload = [p.parent.parent.parent for p in local_oebin_paths]
 
     check_xml_files_match([p / "settings.xml" for p in local_session_paths_for_upload])
@@ -650,7 +684,7 @@ def get_local_remote_oebin_paths(
     return local_oebin_paths, remote_oebin_path
 
 
-def create_merged_oebin_file(paths: Sequence[pathlib.Path]) -> pathlib.Path:
+def create_merged_oebin_file(paths: Sequence[pathlib.Path], probes:Sequence[str]=DEFAULT_PROBES) -> pathlib.Path:
     """Take paths to two or more structure.oebin files and merge them into one.
 
     For recordings split across multiple locations e.g. A:/*_probeABC, B:/*_probeDEF
@@ -683,11 +717,15 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path]) -> pathlib.Path:
             if merged_oebin[key] == oebin_data[key]:
                 continue
 
-            # for 'continuous' and 'events' keys, we want to merge the lists
+            # 'continuous', 'events', 'spikes' are lists, which we want to concatenate across files
             if isinstance(oebin_data[key], List):
                 for idx, item in enumerate(oebin_data[key]):
                     if merged_oebin[key][idx] == item:
                         continue
+                    # skip probes not specified in input args (ie. not inserted)
+                    if 'probe' in item.get('folder_name',''): # one is folder_name:'MessageCenter'
+                        if not any(f'probe{letter}' in item['folder_name'] for letter in probes):
+                            continue
                     else:
                         merged_oebin[key].append(item)
 
