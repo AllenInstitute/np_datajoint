@@ -59,7 +59,7 @@ DJ_OUTBOX: str = zk_config["sorting"][
 LOCAL_INBOX = pathlib.Path(zk_config["sorting"]["local_inbox"])
 
 BOTO3_CONFIG: dict = zk_config["djsciops"]["boto3"]
-KS_PARAMS_INDEX: int = zk_config["sorting"][
+DEFAULT_KS_PARAMS_INDEX: int = zk_config["sorting"][
     "default_kilosort_parameter_set_index"
 ]  # 1=KS 2.0, 2=KS 2.5
 
@@ -197,8 +197,8 @@ class DataJointSession:
     def downloaded_sorted_probe_paths(
         self, probe_letter: str = None
     ) -> pathlib.Path | Sequence[pathlib.Path]:
-        "Paths to probe data folders downloaded from datajoint, with paramset_idx=1, or a single folder for a specified probe letter."
-        query = {"paramset_idx": KS_PARAMS_INDEX}
+        "Paths to all probe data folders downloaded from datajoint with default paramset_idx, or a single folder for a specified probe letter."
+        query = {"paramset_idx": DEFAULT_KS_PARAMS_INDEX}
         probes_available = (self.clustering_task & query).fetch("insertion_number")
         probe_idx = ord(probe_letter) - ord("A") if probe_letter else None
         if probe_letter and probe_idx in probes_available:
@@ -234,7 +234,7 @@ class DataJointSession:
 
     def add_clustering_task(
         self,
-        paramset_idx: int = KS_PARAMS_INDEX,
+        paramset_idx: int = DEFAULT_KS_PARAMS_INDEX,
         probe_letters: Sequence[str] = "ABCDEF",
     ):
         "For existing entries in dj_ephys.EphysRecording, create a new ClusteringTask with the specified `paramset_idx`"
@@ -736,7 +736,7 @@ def add_new_clustering_parameters(
     dj_ephys.ClusteringParamSet.insert1(param_dict, skip_duplicates=True)
 
 
-def get_clustering_parameters(paramset_idx: int = KS_PARAMS_INDEX) -> Tuple[str, dict]:
+def get_clustering_parameters(paramset_idx: int = DEFAULT_KS_PARAMS_INDEX) -> Tuple[str, dict]:
     "Get description and dict of parameters from paramset_idx."
     return (dj_ephys.ClusteringParamSet & {"paramset_idx": paramset_idx}).fetch1(
         "params"
@@ -751,7 +751,7 @@ def all_sessions() -> dj.schemas:
     )))
     return dj_session.Session & all_sessions[list(map(session_str_match_on_datajoint, all_sessions))]    
 
-def get_status_all_sessions(paramset_idx:int=KS_PARAMS_INDEX):
+def get_status_all_sessions(paramset_idx:int=DEFAULT_KS_PARAMS_INDEX):
     """Determine which tables have been autopopulated - from Thinh@DJ.
     
     A table indicating the number of entries in each of several database tables,
