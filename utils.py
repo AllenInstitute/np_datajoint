@@ -174,16 +174,27 @@ class DataJointSession:
         return f"{DJ_INBOX}{'/' if not str(DJ_INBOX).endswith('/') else '' }{self.session_folder}/"
 
     @property
-    def acq_paths(self) -> List[pathlib.Path]:
+    def acq_paths(self) -> tuple[pathlib.Path,...]:
         paths = []
         for drive, probes in zip("AB", ["_probeABC", "_probeDEF"]):
             path = pathlib.Path(f"{drive}:/{self.session_folder}{probes}")
             if path.is_dir():
                 paths.append(path)
-        return paths
+        return tuple(paths)
+
+    @functools.cached_property
+    def lims_info(self) -> Optional[dict]:
+        response = requests.get(f"http://lims2/ecephys_sessions/{self.session_id}.json?")
+        if response.status_code != 200:
+            return None
+        return response.json()
+        
+    @property
+    def lims_path(self) -> Optional[pathlib.Path]:
+        return pathlib.Path(self.lims_info.get('storage_directory',None)) if self.lims_info else None
 
     @property
-    def npexp_path(self) -> pathlib.Path | None:
+    def npexp_path(self) -> Optional[pathlib.Path]:
         path = (
             pathlib.Path("//allen/programs/mindscope/workgroups/np-exp")
             / self.session_folder
