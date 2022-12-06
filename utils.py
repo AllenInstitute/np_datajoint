@@ -102,6 +102,7 @@ class DataJointSession:
                 )
         except dj.DataJointError:
             pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
+        logging.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
 
     @property
     def session(self):
@@ -112,7 +113,7 @@ class DataJointSession:
 
     @property
     def session_key(self) -> dict[str, str | int]:
-        "subject:`str` and session_id:`int`"
+        "{subject:session_id}"
         return self.session.fetch1("KEY")
 
     @property
@@ -125,6 +126,7 @@ class DataJointSession:
 
     @property
     def session_folder_from_dj(self) -> str:
+        "Remote session dir re-assembled from datajoint table components. Should match our local `session_folder`"
         return f"{self.session_id}_{self.session_subject}_{self.session_datetime.strftime('%Y%m%d')}"
 
     @property
@@ -174,7 +176,7 @@ class DataJointSession:
         return f"{DJ_INBOX}{'/' if not str(DJ_INBOX).endswith('/') else '' }{self.session_folder}/"
 
     @property
-    def acq_paths(self) -> tuple[pathlib.Path,...]:
+    def acq_paths(self) -> tuple[pathlib.Path, ...]:
         paths = []
         for drive, probes in zip("AB", ["_probeABC", "_probeDEF"]):
             path = pathlib.Path(f"{drive}:/{self.session_folder}{probes}")
@@ -184,14 +186,20 @@ class DataJointSession:
 
     @functools.cached_property
     def lims_info(self) -> Optional[dict]:
-        response = requests.get(f"http://lims2/ecephys_sessions/{self.session_id}.json?")
+        response = requests.get(
+            f"http://lims2/ecephys_sessions/{self.session_id}.json?"
+        )
         if response.status_code != 200:
             return None
         return response.json()
-        
+
     @property
     def lims_path(self) -> Optional[pathlib.Path]:
-        return pathlib.Path(self.lims_info.get('storage_directory',None)) if self.lims_info else None
+        return (
+            pathlib.Path(self.lims_info.get("storage_directory", None))
+            if self.lims_info
+            else None
+        )
 
     @property
     def npexp_path(self) -> Optional[pathlib.Path]:
@@ -415,7 +423,7 @@ class DataJointSession:
             f"Finished downloading sorted data {self.local_download_path}"
         )
 
-    def sorting_summary(self):
+    def sorting_summary(self) -> pd.DataFrame:
         df = sorting_summary()
         return df.loc[[self.session_folder]].transpose()
 
@@ -423,7 +431,7 @@ class DataJointSession:
         "Insert metadata for session in datajoint tables"
 
         remote_session_dir_relative = (
-            pathlib.Path(self.session_folder) / remote_oebin_path.parent 
+            pathlib.Path(self.session_folder) / remote_oebin_path.parent
         )
 
         if dj_session.SessionDirectory & {"session_dir": self.session_folder}:
@@ -453,7 +461,7 @@ class DataJointSession:
                 {
                     "subject": self.mouse_id,
                     "session_id": self.session_id,
-                    "session_dir": remote_session_dir_relative.as_posix() + '/',
+                    "session_dir": remote_session_dir_relative.as_posix() + "/",
                 },
                 replace=True,
             )
@@ -473,6 +481,7 @@ def get_session_folder(path: str | pathlib.Path) -> str | None:
             )
         return session_folders[0]
     return None
+
 
 @functools.cache
 def dir_size(path: pathlib.Path) -> int:
@@ -497,39 +506,41 @@ def is_new_ephys_folder(path: pathlib.Path) -> bool:
         and tuple(path.rglob("settings*.xml"))
         and tuple(path.rglob("continuous.dat"))
     )
-    
+
+
 def is_valid_ephys_folder(path: pathlib.Path) -> bool:
     "Check a single dir of raw data for size, v0.6.x+ Open Ephys for DataJoint."
     if not path.is_dir():
         return False
     if not is_new_ephys_folder(path):
         return False
-    if not dir_size(path) > 275*1024**3: # GB
+    if not dir_size(path) > 275 * 1024**3:  # GB
         return False
     return True
+
 
 def is_valid_pair_split_ephys_folders(paths: Sequence[pathlib.Path]) -> bool:
     "Check a pair of dirs of raw data for size, matching settings.xml, v0.6.x+ to confirm they're from the same session and meet expected criteria."
     if not paths:
         return False
-    
+
     if any(not is_valid_ephys_folder(path) for path in paths):
         return False
-    
+
     check_session_paths_match(paths)
     check_xml_files_match([tuple(path.rglob("settings*.xml"))[0] for path in paths])
-    
+
     size_difference_threshold_gb = 2
-    dir_sizes_gb = tuple(
-        round(dir_size(path)/ 1024**3)
-        for path in paths
-        )
+    dir_sizes_gb = tuple(round(dir_size(path) / 1024**3) for path in paths)
     diffs = (abs(dir_sizes_gb[0] - size) for size in dir_sizes_gb)
     if not all(diff <= size_difference_threshold_gb for diff in diffs):
-        print(f"raw data folders are not within {size_difference_threshold_gb} GB of each other")
+        print(
+            f"raw data folders are not within {size_difference_threshold_gb} GB of each other"
+        )
         return False
-    
+
     return True
+
 
 def get_raw_ephys_subfolders(path: pathlib.Path) -> List[pathlib.Path]:
     """
@@ -613,6 +624,7 @@ def check_xml_files_match(paths: Sequence[pathlib.Path]):
     if not all(c == checksums[0] for c in checksums):
         raise ValueError("XML files do not match")
 
+
 def check_session_paths_match(paths: Sequence[pathlib.Path]):
     sessions = [get_session_folder(path) for path in paths]
     if any(not s for s in sessions):
@@ -621,6 +633,7 @@ def check_session_paths_match(paths: Sequence[pathlib.Path]):
         )
     if not all(s and s == sessions[0] for s in sessions):
         raise ValueError("Paths must all be for the same session")
+
 
 def get_local_remote_oebin_paths(
     paths: pathlib.Path | Sequence[pathlib.Path],
@@ -654,7 +667,9 @@ def get_local_remote_oebin_paths(
             break  # we're done anyway, just making this clear
 
         if ephys_subfolders:
-            logging.warning(f"Multiple subfolders of raw data found in {path} - expected a single folder.")
+            logging.warning(
+                f"Multiple subfolders of raw data found in {path} - expected a single folder."
+            )
             local_session_paths.update(e for e in ephys_subfolders)
             continue
 
@@ -688,7 +703,9 @@ def get_local_remote_oebin_paths(
     return local_oebin_paths, remote_oebin_path
 
 
-def create_merged_oebin_file(paths: Sequence[pathlib.Path], probes:Sequence[str]=DEFAULT_PROBES) -> pathlib.Path:
+def create_merged_oebin_file(
+    paths: Sequence[pathlib.Path], probes: Sequence[str] = DEFAULT_PROBES
+) -> pathlib.Path:
     """Take paths to two or more structure.oebin files and merge them into one.
 
     For recordings split across multiple locations e.g. A:/*_probeABC, B:/*_probeDEF
@@ -794,7 +811,9 @@ def add_new_clustering_parameters(
     dj_ephys.ClusteringParamSet.insert1(param_dict, skip_duplicates=True)
 
 
-def get_clustering_parameters(paramset_idx: int = DEFAULT_KS_PARAMS_INDEX) -> Tuple[str, dict]:
+def get_clustering_parameters(
+    paramset_idx: int = DEFAULT_KS_PARAMS_INDEX,
+) -> Tuple[str, dict]:
     "Get description and dict of parameters from paramset_idx."
     return (dj_ephys.ClusteringParamSet & {"paramset_idx": paramset_idx}).fetch1(
         "params"
@@ -1012,7 +1031,9 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
             with out:
                 IPython.display.display(session.sorting_summary())
         except dj.DataJointError:
-            logging.info(f"No entry found in DataJoint for session {session_dropdown.value}")
+            logging.info(
+                f"No entry found in DataJoint for session {session_dropdown.value}"
+            )
 
     progress_button.observe(handle_progress_change, names="value")
 
