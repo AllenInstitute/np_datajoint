@@ -800,79 +800,113 @@ def get_clustering_parameters(paramset_idx: int = DEFAULT_KS_PARAMS_INDEX) -> Tu
         "params"
     )
 
-def all_sessions() -> dj.schemas.Session:
+
+def all_sessions() -> dj_session.Session:
     "Correctly formatted sessions on Datajoint."
     logging.debug("Fetching all correctly-formatted sessions from DataJoint server")
     all_sessions = dj_session.Session.fetch()
-    session_str_match_on_datajoint = (
-        lambda x: bool(get_session_folder(
-            f"{x[1]}_{x[0]}_{x[2].strftime('%Y%m%d')}"
-    )))
-    return dj_session.Session & all_sessions[list(map(session_str_match_on_datajoint, all_sessions))]    
+    session_str_match_on_datajoint = lambda x: bool(
+        get_session_folder(f"{x[1]}_{x[0]}_{x[2].strftime('%Y%m%d')}")
+    )
+    return (
+        dj_session.Session
+        & all_sessions[list(map(session_str_match_on_datajoint, all_sessions))]
+    )
 
-def get_status_all_sessions(paramset_idx: Optional[int] = DEFAULT_KS_PARAMS_INDEX) -> dj.schemas.Session:
-    """Summary of processing for all sessions, with optional restriction on paramset_idx - modified from Thinh@DJ.
-    
-        Table is returned, can be further restricted with queries.
+
+SORTING_STATUS_LAST_CHECKED: dict[Optional[int], datetime.datetime] = dict()
+
+
+def get_sorting_status_all_sessions(
+    paramset_idx: Optional[int] = DEFAULT_KS_PARAMS_INDEX,
+) -> dj_session.Session:
+    """Summary of processing for all probes across all sessions, with optional restriction on paramset_idx - modified from Thinh@DJ.
+    - `paramset_idx = None` returns all probes
+    - `paramset_idx = -1` returns probes with no paramset_idx (ie. haven't started
+      processing)
+
+    Table is returned, can be further restricted with queries.
     """
-    
+
     def paramset_restricted(schema: dj.schemas.Schema) -> dj.schemas.Schema:
+        "Restrict table to sessions that used one or more paramset_idx."
         if paramset_idx is None:
             return schema
-        else:
-            return schema & {'paramset_idx':paramset_idx}
-        
-    session_process_status = all_sessions()
-    
-    logging.debug(f'Restricting processing status summary to sessions with paramset_idx={paramset_idx if paramset_idx is not None else "all"}')
+        if -1 == paramset_idx:
+            return schema & {"paramset_idx": None}
+        return schema & {"paramset_idx": paramset_idx}
 
-    session_process_status *= dj_session.Session.aggr(
-        dj_ephys.ProbeInsertion, probes="count(insertion_number)", keep_all_rows=True
-    )
-    # session_process_status *= dj_session.Session.aggr(
-    #     dj_ephys.ProbeInsertion, pidx="insertion_number", keep_all_rows=True
-    # )
-    session_process_status *= dj_session.Session.aggr(
-        dj_ephys.EphysRecording,
-        ephys="count(insertion_number)",
-        keep_all_rows=True,
-    )
-    session_process_status *= dj_session.Session.aggr(
-        dj_ephys.LFP,
-        lfp="count(insertion_number)",
-        keep_all_rows=True
-    )
-    session_process_status *= dj_session.Session.aggr(
-        paramset_restricted(dj_ephys.ClusteringTask),
-        task="count(insertion_number)",
-        keep_all_rows=True,
-    )
-    session_process_status *= dj_session.Session.aggr(
-        paramset_restricted(dj_ephys.Clustering), 
-        clustering="count(insertion_number)", 
-        keep_all_rows=True
-    )
-    session_process_status *= dj_session.Session.aggr(
-        paramset_restricted(dj_ephys.CuratedClustering),
-        curated="count(insertion_number)",
-        pidx='GROUP_CONCAT(insertion_number SEPARATOR ", ")',
-        keep_all_rows=True,
-    )
-    session_process_status *= dj_session.Session.aggr(
-        paramset_restricted(dj_ephys.QualityMetrics), 
-        metrics="count(insertion_number)", 
-        keep_all_rows=True
-    )
-    session_process_status *= dj_session.Session.aggr(
-        paramset_restricted(dj_ephys.WaveformSet), 
-        waveform="count(insertion_number)", 
-        keep_all_rows=True
+    logging.debug(
+        f'Restricting processing status summary to sessions with paramset_idx={paramset_idx if paramset_idx is not None else "all"}'
     )
 
-    return session_process_status.proj(..., all_done="probes > 0 AND waveform = task")
+    @functools.cache
+    def _get_sorting_status_all_sessions(paramset_idx) -> dj_session.Session:
+        "Calling all these tables is slow (>10s), so cache the result."
+        SORTING_STATUS_LAST_CHECKED[paramset_idx] = datetime.datetime.now()
 
-def sorting_summary() -> pd.DataFrame:
-    df = pd.DataFrame(get_status_all_sessions())
+        session_process_status = all_sessions()
+
+        session_process_status *= dj_session.Session.aggr(
+            dj_ephys.ProbeInsertion,
+            probes="count(insertion_number)",
+            keep_all_rows=True,
+        )
+        session_process_status *= dj_session.Session.aggr(
+            dj_ephys.EphysRecording,
+            ephys="count(insertion_number)",
+            keep_all_rows=True,
+        )
+        session_process_status *= dj_session.Session.aggr(
+            dj_ephys.LFP, lfp="count(insertion_number)", keep_all_rows=True
+        )
+        session_process_status *= dj_session.Session.aggr(
+            paramset_restricted(dj_ephys.ClusteringTask),
+            task="count(insertion_number)",
+            keep_all_rows=True,
+        )
+        session_process_status *= dj_session.Session.aggr(
+            paramset_restricted(dj_ephys.Clustering),
+            clustering="count(insertion_number)",
+            keep_all_rows=True,
+        )
+        session_process_status *= dj_session.Session.aggr(
+            paramset_restricted(dj_ephys.CuratedClustering),
+            curated="count(insertion_number)",
+            pidx='GROUP_CONCAT(insertion_number SEPARATOR ", ")',
+            keep_all_rows=True,
+        )
+        session_process_status *= dj_session.Session.aggr(
+            paramset_restricted(dj_ephys.QualityMetrics),
+            metrics="count(insertion_number)",
+            keep_all_rows=True,
+        )
+        session_process_status *= dj_session.Session.aggr(
+            paramset_restricted(dj_ephys.WaveformSet),
+            waveform="count(insertion_number)",
+            keep_all_rows=True,
+        )
+        return session_process_status.proj(
+            ..., all_done="probes > 0 AND waveform = task"
+        )
+
+    if SORTING_STATUS_LAST_CHECKED.get(
+        paramset_idx, datetime.datetime.now()
+    ) < datetime.datetime.now() - datetime.timedelta(hours=1):
+        logging.debug("Clearing cache for _get_sorting_status_all_sessions")
+        _get_sorting_status_all_sessions.cache_clear()
+    return _get_sorting_status_all_sessions(paramset_idx)
+
+
+def sorting_summary(
+    paramset_idx: Optional[int] = DEFAULT_KS_PARAMS_INDEX,
+) -> pd.DataFrame:
+    """Summary of processing for all probes across all sessions, with optional restriction on `paramset_idx` - modified from Thinh@DJ.
+    - `paramset_idx = None` returns all probes
+    - `paramset_idx = -1` returns probes with no paramset_idx (ie. haven't started
+      processing)
+    """
+    df = pd.DataFrame(get_sorting_status_all_sessions(paramset_idx))
     # make new 'session' column that matches our local session folder names
     session_str_from_datajoint_keys = (
         lambda x: x.session_id.astype(str)
