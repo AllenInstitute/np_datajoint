@@ -708,7 +708,7 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path], probes:Sequence[str]
     check_xml_files_match(
         [p / "settings.xml" for p in [o.parent.parent.parent for o in paths]]
     )
-    
+
     logging.debug(f"Creating merged oebin file with {probes=} from {paths}")
     merged_oebin: dict = {}
     for oebin in sorted(paths):
@@ -718,17 +718,21 @@ def create_merged_oebin_file(paths: Sequence[pathlib.Path], probes:Sequence[str]
 
         for key in oebin_data:
 
-            if merged_oebin.get(key,None) == oebin_data[key]:
+            if merged_oebin.get(key, None) == oebin_data[key]:
                 continue
 
             # 'continuous', 'events', 'spikes' are lists, which we want to concatenate across files
             if isinstance(oebin_data[key], List):
                 for item in oebin_data[key]:
-                    if merged_oebin.get(key,None) and item in merged_oebin[key]:
+                    if merged_oebin.get(key, None) and item in merged_oebin[key]:
                         continue
                     # skip probes not specified in input args (ie. not inserted)
-                    if 'probe' in item.get('folder_name',''): # one is folder_name:'MessageCenter'
-                        if not any(f'probe{letter}' in item['folder_name'] for letter in probes):
+                    if "probe" in item.get(
+                        "folder_name", ""
+                    ):  # one is folder_name:'MessageCenter'
+                        if not any(
+                            f"probe{letter}" in item["folder_name"] for letter in probes
+                        ):
                             continue
                     if merged_oebin.get(key, None) is None:
                         merged_oebin[key] = [item]
