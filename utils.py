@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import platform
 import re
 import sys
 import tempfile
@@ -24,6 +25,7 @@ import pandas as pd
 import IPython
 import ipywidgets as ipw
 import requests
+import fabric
 
 np_logging.setup(
     config = np_logging.fetch_zk_config("/projects/datajoint/defaults/logging"),    
@@ -70,6 +72,11 @@ dj_ephys = dj.create_virtual_module("ephys", "mindscope_dynamic-routing_ephys")
 dj_probe = dj.create_virtual_module("probe", "mindscope_dynamic-routing_probe")
 
 DEFAULT_PROBES = "ABCDEF"
+
+RUNNING_ON_HPC: bool = bool(
+    re.match("n[0-9]{,}|hpc-login", HOSTNAME := platform.node())
+)  # hpc nodes named 'n73'
+logging.debug("%s Running on HPC: %s", HOSTNAME, RUNNING_ON_HPC)
 
 
 class SessionDirNotFoundError(ValueError):
@@ -318,48 +325,115 @@ class DataJointSession:
                 return
             else:
                 dj_ephys.ClusteringTask.insert1(task_key, replace=True)
-        
-    def get_raw_ephys_paths(self, paths: Optional[Sequence[str | pathlib.Path]] = None) -> tuple[pathlib.Path,...]:
+
+    def get_raw_ephys_paths(
+        self,
+        paths: Optional[Sequence[str | pathlib.Path]] = None,
+        probes: str = DEFAULT_PROBES,
+    ) -> tuple[pathlib.Path, ...]:
         """Return paths to the session's ephys data.
-            The first match is returned from:
-            1) paths specified in input arg,
-            2) self.path
-            3) A:/B: drives if running from an Acq computer
-            4) session folder on lims
-            5) session folder on npexp (should be careful with older sessions where data
-                may have been deleted)
+        The first match is returned from:
+        1) paths specified in input arg,
+        2) self.path
+        3) A:/B: drives if running from an Acq computer
+        4) session folder on lims
+        5) session folder on npexp (should be careful with older sessions where data
+            may have been deleted)
         """
         for path in (paths, self.path, self.acq_paths, self.lims_path, self.npexp_path):
             if not path:
                 continue
             if not isinstance(path, Sequence):
                 path = (path,)
-            matching_session_folders = {s for p in path for s in get_raw_ephys_subfolders(p)}
-            if is_valid_pair_split_ephys_folders(matching_session_folders):
+
+            def filter(path):
+                if match := re.search("(?<=_probe)[A-F]{,}", path.name):
+                    if any(p in probes for p in match[0]):
+                        return path
+
+            matching_session_folders = {
+                s for p in path for s in get_raw_ephys_subfolders(p) if filter(s)
+            }
+            if len(matching_session_folders) == 1 or is_valid_pair_split_ephys_folders(
+                matching_session_folders
+            ):
+                logging.debug(matching_session_folders)
                 return matching_session_folders
-    
+
+    def upload_from_hpc(self, paths, probes, without_sorting):
+        "Relay job to HPC. See .upload() for input arg details."
+
+        logging.info(
+            "Connecting to HPC via SSH, logs will continue in /allen/ai/homedirs"
+        )
+        with fabric.Connection("hpc-login") as ssh:
+
+            # copy up-to-date files to hpc
+            src_dir = "hpc/"
+            slurm_launcher = "slurm_launcher.py"
+            upload_script = "upload_session.py"
+            hpc_dir = "np_datajoint/"
+            for file in (
+                src_dir + slurm_launcher,
+                src_dir + upload_script,
+                pathlib.Path(__file__).name,
+            ):
+                ssh.put(file, hpc_dir)
+
+            # launch upload job via slurm
+            slurm_env = datajoint_env = "dj"
+            cmd = f"conda activate {slurm_env};"
+            cmd += f"cd {hpc_dir}; python {slurm_launcher} {datajoint_env}"
+            # addtl args below will be passed to slurm batch job and parsed by upload_script
+            cmd += f" {upload_script} --session {self.session_folder} --paths {' '.join(path.as_posix() for path in paths)} --probes {probes}"
+            if without_sorting:
+                cmd += " --without_sorting"
+            ssh.run(cmd)  # submit all cmds in one line to enforce sequence.
+            # ensures slurm job doesn't run until conda env is activated
+            logging.debug(cmd)
+
     def upload(
         self,
-        probes: Sequence[str] = DEFAULT_PROBES,
         paths: Optional[Sequence[str | pathlib.Path]] = None,
+        probes: Sequence[str] = DEFAULT_PROBES,
         without_sorting=False,
     ):
         """Upload from rig/network share to DataJoint server.
 
-        Accepts a list of paths to upload, or if None, will try to upload from self.path,
+        Accepts a list of paths to upload or, if None, will try to upload from self.path,
         then A:/B:, then lims, then npexp.
         """
-        paths = self.get_raw_ephys_paths(paths)
+        paths = self.get_raw_ephys_paths(paths, probes)
+        logging.debug(f"Paths to upload: {paths}")
 
         local_oebin_paths, remote_oebin_path = get_local_remote_oebin_paths(paths)
         local_session_paths_for_upload = (
             p.parent.parent.parent for p in local_oebin_paths
         )
 
+        DATA_ON_NETWORK = paths != self.acq_paths
+        if DATA_ON_NETWORK and not RUNNING_ON_HPC:
+            try:
+                self.upload_from_hpc(paths, probes, without_sorting)
+                return
+            except Exception as e:
+                logging.exception(
+                    "Could not connect to HPC: uploading data on //allen from local machine, which may be unstable"
+                )
+
+        if DATA_ON_NETWORK or RUNNING_ON_HPC:
+            BOTO3_CONFIG[
+                "max_concurrency"
+            ] = 100  # transfers over network can crash if set too high
+            logging.info(
+                "Data on network: limiting max_concurrency to %s",
+                BOTO3_CONFIG["max_concurrency"],
+            )
+
         if not without_sorting:
             self.create_session_entry(remote_oebin_path)
 
-            # upload merged oebin file first
+            # upload merged oebin file
             # ------------------------------------------------------- #
             temp_merged_oebin_path = create_merged_oebin_file(local_oebin_paths, probes)
             dj_axon.upload_files(
@@ -376,12 +450,10 @@ class DataJointSession:
         )
         ignore_regex = ".*\.oebin"
         ignore_regex += "|.*\.".join(
-                    [" "]
-                    + [
-                        f"probe{letter}-.*"
-                        for letter in set(DEFAULT_PROBES) - set(probes)
-                    ]
-                ).strip()
+            [" "]
+            + [f"probe{letter}-.*" for letter in set(DEFAULT_PROBES) - set(probes)]
+        ).strip()
+
         for local_path in local_session_paths_for_upload:
             dj_axon.upload_files(
                 source=local_path,
@@ -408,9 +480,7 @@ class DataJointSession:
                 sec=1800,
                 msg=f"Waiting for {self.session_folder} processing to complete to download sorted data...",
             )
-        logging.getLogger("web").info(
-            f"Downloading sorted data {self.session_folder}"
-        )
+        logging.getLogger("web").info(f"Downloading sorted data {self.session_folder}")
         dj_axon.download_files(
             source=self.remote_session_dir_outbox,
             destination=f"{self.local_download_path}\\",  # if using linux - this should be fwd slash
@@ -552,7 +622,7 @@ def get_raw_ephys_subfolders(path: pathlib.Path) -> List[pathlib.Path]:
 
     subfolders = set()
 
-    for f in path.rglob("*_probe*"):
+    for f in pathlib.Path(path).rglob("*_probe*"):
 
         if not f.is_dir():
             continue

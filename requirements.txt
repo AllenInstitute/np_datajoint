@@ -1,6 +1,7 @@
 --index-url https://pypi.org/simple
-djsciops 
 datajoint
+djsciops 
+requests
 ipykernel
 ipython
 jupyter
@@ -8,4 +9,5 @@ mypy
 black
 seaborn
 pandas
+fabric
 np_logging
