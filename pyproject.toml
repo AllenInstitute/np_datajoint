@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "np-datajoint"
+version = "0.0.2"
+description = "Tools for spike-sorting Mindscope neuropixels ecephys sessions on DataJoint, retrieving results and comparing with locally-sorted equivalents."
+authors = [
+    "Ben Hardcastle <ben.hardcastle@alleninstitute.org>",
+]
+maintainers = ["Ben Hardcastle <ben.hardcastle@alleninstitute.org>"]
+readme = "README.md"
+# include = ["notebooks/*"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.poetry.urls]
+"Repository" = "https://github.com/alleninstitute/np_datajoint"
+"Bug Tracker" = "https://github.com/alleninstitute/np_datajoint/issues"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+numpy = "^1"
+pandas = "^1.5"
+ipywidgets = "^7" # for VScode (Dec2022)
+ipykernel = "^6"
+ipython = "^8"
+jupyter = "^1"
+datajoint = "^0.13"
+djsciops = "^1"
+requests = "^2"
+seaborn = "^0"
+fabric = "^2"
+np_logging = "^0"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

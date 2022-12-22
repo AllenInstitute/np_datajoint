@@ -5,6 +5,7 @@ requests
 ipykernel
 ipython
 jupyter
+ipywidgets==7.* # for VScode (Dec2022)
 mypy
 black
 seaborn
