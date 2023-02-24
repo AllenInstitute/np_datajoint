@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "np-datajoint"
-version = "0.0.2"
+version = "0.0.4"
 description = "Tools for spike-sorting Mindscope neuropixels ecephys sessions on DataJoint, retrieving results and comparing with locally-sorted equivalents."
 authors = [
     "Ben Hardcastle <ben.hardcastle@alleninstitute.org>",
@@ -21,17 +21,15 @@ classifiers = [
 [tool.poetry.dependencies]
 python = "^3.10"
 numpy = "^1"
-pandas = "^1.5"
+pandas = "^1"
 ipywidgets = "^7" # for VScode (Dec2022)
-ipykernel = "^6"
-ipython = "^8"
-jupyter = "^1"
-datajoint = "^0.13"
+datajoint = "0.13"
 djsciops = "^1"
-requests = "^2"
-seaborn = "^0"
+requests = "*"
+seaborn = "*"
 fabric = "^2"
-np_logging = "^0"
+np_logging = "*"
+np_session = "*"
 
 [tool.poetry.dev-dependencies]
 
