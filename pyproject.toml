@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "np-datajoint"
-version = "0.0.4"
+version = "0.0.5"
 description = "Tools for spike-sorting Mindscope neuropixels ecephys sessions on DataJoint, retrieving results and comparing with locally-sorted equivalents."
 authors = [
     "Ben Hardcastle <ben.hardcastle@alleninstitute.org>",
@@ -24,15 +24,44 @@ numpy = "^1"
 pandas = "^1"
 ipywidgets = "^7" # for VScode (Dec2022)
 datajoint = "0.13"
-djsciops = "^1"
+djsciops = "1.4.1"
 requests = "*"
 seaborn = "*"
 fabric = "^2"
 np_logging = "*"
 np_session = "*"
+setuptools = "^67.4.0"
 
 [tool.poetry.dev-dependencies]
 
+
+[tool.pdm]
+[tool.pdm.dev-dependencies]
+dev = []
+
+[tool.pdm.build]
+includes = []
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["pdm-pep517>=1.0.0"]
+build-backend = "pdm.pep517.api"
+
+
+[project]
+name = "np-datajoint"
+version = "0.0.4"
+description = "Tools for spike-sorting Mindscope neuropixels ecephys sessions on DataJoint, retrieving results and comparing with locally-sorted equivalents."
+authors = [
+    {name = "bjhardcastle", email = "ben.hardcastle@alleninstitute.org"},
+]
+dependencies = ["numpy<2,>=1", "pandas<2,>=1", "ipywidgets<8,>=7", "datajoint==0.13", "djsciops==1.4.1", "requests", "seaborn", "fabric<3,>=2", "np-logging", "np-session"]
+requires-python = ">=3.10,<4.0"
+readme = "README.md"
+license = {text = "MIT"}
+maintainers = [
+    {name = "Ben Hardcastle", email = "ben.hardcastle@alleninstitute.org"},
+]
+classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License", "Operating System :: OS Independent"]
+
+[project.urls]
+Repository = "https://github.com/alleninstitute/np_datajoint"
+"Bug Tracker" = "https://github.com/alleninstitute/np_datajoint/issues"
