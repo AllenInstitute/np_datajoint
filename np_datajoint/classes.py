@@ -38,6 +38,8 @@ import seaborn as sns
 
 from np_datajoint import config, utils
 
+logger = np_logging.getLogger(__name__)
+
 
 class SessionDirNotFoundError(ValueError):
     pass
@@ -68,7 +70,7 @@ class DataJointSession:
                 )
         except dj.DataJointError:
             pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
-        logging.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
+        logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
 
     @property
     def session(self):
@@ -167,6 +169,7 @@ class DataJointSession:
     def lims_path(self) -> Optional[pathlib.Path]:
         if self.lims_info and (path := self.lims_info["storage_directory"]):
             return pathlib.Path('/'+path)
+        return None
 
     @property
     def npexp_path(self) -> Optional[pathlib.Path]:
@@ -199,7 +202,7 @@ class DataJointSession:
     ):
         "For existing entries in config.DJ_EPHYS.EphysRecording, create a new ClusteringTask with the specified `paramset_idx`"
         if not self.probe_insertion:
-            logging.info(
+            logger.info(
                 f"Probe insertions have not been auto-populated for {self.session_folder} - cannot add additional clustering task yet."
             )
             return
@@ -223,7 +226,7 @@ class DataJointSession:
                     msg = f"ProbeInsertion entry already exists - ClusteringTask should be auto-populated soon."
                 else:
                     msg = f"ProbeInsertion and ClusteringTask entries don't exist - either metadata/critical files are missing, or processing hasn't started yet."
-                logging.info(
+                logger.info(
                     f"Skipping ClusteringTask entry for {self.session_folder}_probe{probe_letter}: {msg}"
                 )
                 continue
@@ -255,7 +258,7 @@ class DataJointSession:
             }
 
             if config.DJ_EPHYS.ClusteringTask & task_key:
-                logging.info(f"Clustering task already exists: {task_key}")
+                logger.info(f"Clustering task already exists: {task_key}")
                 return
             else:
                 config.DJ_EPHYS.ClusteringTask.insert1(task_key, replace=True)
@@ -291,7 +294,7 @@ class DataJointSession:
             if len(matching_session_folders) == 1 or utils.is_valid_pair_split_ephys_folders(
                 matching_session_folders
             ):
-                logging.debug(matching_session_folders)
+                logger.debug(matching_session_folders)
                 return tuple(matching_session_folders)
         else:
             raise FileNotFoundError(f"No valid ephys raw data folders (v0.6+) found")
@@ -299,7 +302,7 @@ class DataJointSession:
     def upload_from_hpc(self, paths, probes, without_sorting):
         "Relay job to HPC. See .upload() for input arg details."
         hpc_user = "svc_neuropix"
-        logging.info(
+        logger.info(
             "Connecting to HPC via SSH, logs will continue in /allen/ai/homedirs/%s", hpc_user
         )
         with fabric.Connection(f"{hpc_user}@hpc-login") as ssh:
@@ -322,7 +325,7 @@ class DataJointSession:
                 cmd += " --without_sorting"
             ssh.run(cmd)  # submit all cmds in one line to enforce sequence -
             # ensures slurm job doesn't run until conda env is activated
-            logging.debug(cmd)
+            logger.debug(cmd)
 
     def upload(
         self,
@@ -336,20 +339,20 @@ class DataJointSession:
         then A:/B:, then lims, then npexp.
         """
         paths = self.get_raw_ephys_paths(paths, probes)
-        logging.debug(f"Paths to upload: {paths}")
+        logger.debug(f"Paths to upload: {paths}")
 
         local_oebin_paths, remote_oebin_path = utils.get_local_remote_oebin_paths(paths)
         local_session_paths_for_upload = (
             p.parent.parent.parent for p in local_oebin_paths
         )
 
-        data_on_network = paths != self.acq_paths
+        data_on_network = str(paths[0]).startswith("//allen") or str(paths[0]).startswith("/allen")
         if data_on_network and not config.RUNNING_ON_HPC:
             try:
                 self.upload_from_hpc(paths, probes, without_sorting)
                 return
             except Exception as e:
-                logging.exception(
+                logger.exception(
                     "Could not connect to HPC: uploading data on //allen from local machine, which may be unstable"
                 )
 
@@ -357,7 +360,7 @@ class DataJointSession:
             config.BOTO3_CONFIG[
                 "max_concurrency"
             ] = 100  # transfers over network can crash if set too high
-            logging.info(
+            logger.info(
                 "Data on network: limiting max_concurrency to %s",
                 config.BOTO3_CONFIG["max_concurrency"],
             )
@@ -377,7 +380,7 @@ class DataJointSession:
 
         # upload rest of raw data
         # ------------------------------------------------------- #
-        logging.getLogger("web").info(
+        logger.getLogger("web").info(
             f"Started uploading raw data {self.session_folder}"
         )
         ignore_regex = ".*\.oebin"
@@ -395,7 +398,7 @@ class DataJointSession:
                 boto3_config=config.BOTO3_CONFIG,
                 ignore_regex=ignore_regex,
             )
-        logging.getLogger("web").info(
+        logger.getLogger("web").info(
             f"Finished uploading raw data {self.session_folder}"
         )
     
@@ -465,7 +468,7 @@ class DataJointSession:
             for sorted_paramset_idx in sorted_paramset_idxs:
                 if paramset_idx and sorted_paramset_idx != paramset_idx:
                     continue
-                logging.debug(f"Downloading sorted data for {self.session_folder} probe{chr(ord('A')+probe_idx)}, paramset_idx={sorted_paramset_idx}")
+                logger.debug(f"Downloading sorted data for {self.session_folder} probe{chr(ord('A')+probe_idx)}, paramset_idx={sorted_paramset_idx}")
                 src_list, dest_list = self.filtered_remote_and_local_sorted_paths(probe_idx, sorted_paramset_idx, skip_large_files)
                 trailing_slash = '/' if 'win' not in sys.platform else '\\' # add if dest is dir
                 for src, dest in zip(src_list, dest_list):    
@@ -477,9 +480,9 @@ class DataJointSession:
                 try:    
                     utils.update_metrics_csv_with_missing_columns(self.session_folder, probe_idx, sorted_paramset_idx)
                 except Exception as exc:
-                    logging.exception(exc)
+                    logger.exception(exc)
                 utils.copy_files_from_raw_to_sorted(self.session_folder, probe_idx, sorted_paramset_idx, make_symlinks=True, original_ap_continuous_dat=True)
-        logging.info(
+        logger.info(
             f"Finished downloading sorted data for {self.session_folder}"
         )
 
@@ -495,7 +498,7 @@ class DataJointSession:
         )
 
         if config.DJ_SESSION.SessionDirectory & {"session_dir": self.session_folder}:
-            logging.info(f"Session entry already exists for {self.session_folder}")
+            logger.info(f"Session entry already exists for {self.session_folder}")
 
         if not config.DJ_SUBJECT.Subject & {"subject": self.mouse_id}:
             # insert new subject
@@ -568,16 +571,16 @@ class Probe:
         **kwargs
         ) -> plt.Axes | None:
         if not self.metrics_csv.exists():
-            logging.info(f"No metrics.csv file found for {self:!r}")
+            logger.info(f"No metrics.csv file found for {self:!r}")
             return None
         if 'quality' not in self.metrics_df.columns:
-            logging.info(f"No quality column in metrics for {self:!r}")
+            logger.info(f"No quality column in metrics for {self:!r}")
             return None
         if all(self.metrics_df['quality'] == 'noise'):
-            logging.info(f"All clusters are noise for {self:!r}")
+            logger.info(f"All clusters are noise for {self:!r}")
             return None
         if len(self.metrics_df.loc[self.metrics_df['quality']=='good']) == 1:
-            logging.info(f"Only one good cluster for {self:!r}")
+            logger.info(f"Only one good cluster for {self:!r}")
             return None
         if ax is None:
             fig, ax = plt.subplots()

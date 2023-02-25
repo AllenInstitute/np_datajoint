@@ -30,6 +30,7 @@ import fabric
 import IPython
 import ipywidgets as ipw
 import matplotlib.pyplot as plt
+import np_config
 import np_logging
 import numpy as np
 import pandas as pd
@@ -42,8 +43,8 @@ for log_name in ("Primary", "datajoint"):  # both datajoint packages
     
 
 # config ------------------------------------------------------------------------------
-# get zookeeper config via np_logging
-zk_config = np_logging.fetch_zk_config("/projects/np_datajoint/defaults/configuration")
+# get zookeeper config 
+zk_config = np_config.from_zk("/projects/np_datajoint/defaults/configuration")
 
 # configure datajoint session
 dj.config.update(
@@ -54,7 +55,7 @@ S3_SESSION = dj_auth.Session(
     aws_account_id=zk_config["djsciops"]["aws"]["account_id"],
     s3_role=zk_config["djsciops"]["s3"]["role"],
     auth_client_id=zk_config["djsciops"]["djauth"]["client_id"],
-    auth_client_secret=zk_config["djsciops"]["djauth"]["client_secret"],
+    # bearer_token=zk_config["djsciops"]["djauth"]["client_secret"],
 )
 S3_BUCKET: str = zk_config["djsciops"]["s3"]["bucket"]
 
