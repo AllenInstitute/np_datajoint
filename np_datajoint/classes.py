@@ -707,3 +707,49 @@ class ProbeDataJoint(Probe):
             self._metrics_df = metrics.join(quality['quality'])
         return self._metrics_df
       
+
+class DRPilot(DataJointSession):
+    """A class to handle data transfers between local rigs/network shares, and the DataJoint server."""
+
+    def __init__(self, session_folder_path: str | pathlib.Path):
+        self.path = pathlib.Path(session_folder_path)
+        self.session_folder = self.get_session_folder(self.path.name)
+        "DRpilot_[6-digit mouse ID]_[8-digit date]"
+        if self.session_folder is None:
+            raise SessionDirNotFoundError(
+                f"Input does not contain a session directory (e.g. DRpilot_366122_20220618): {session_folder_path}"
+            )
+            
+        _, self.mouse_id, date = self.session_folder.split("_")
+        self.date = datetime.datetime.strptime(date, "%Y%m%d").date()
+        
+        self.session_id = self.mouse_id + date
+        
+        try:
+            if self.session_folder != self.session_folder_from_dj:
+                raise SessionDirNotFoundError(
+                    f"Session folder `{self.session_folder}` does not match components on DataJoint: {self.session_folder_from_dj}"
+                )
+        except dj.DataJointError:
+            pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
+
+        logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
+
+    @staticmethod
+    def get_session_folder(path: str | pathlib.Path) -> str | None:
+        """Extract ["DRpilot_[6-digit mouse ID]_[8-digit date str] from a string or path.
+        """
+        session_reg_exp = R"DRpilot_[0-9]{6}_[0-9]{8}"
+
+        session_folders = re.findall(session_reg_exp, str(path))
+        return session_folders[0] if session_folders else None
+    
+    @property
+    def session_folder_from_dj(self) -> str:
+        "Remote session dir re-assembled from datajoint table components. Should match our local `session_folder`"
+        return f"DRpilot_{self.session_subject}_{self.session_datetime.strftime('%Y%m%d')}"
+
+    def lims_info(self) -> Optional[dict]:
+        """Get LIMS info for this session. 
+        """
+        logger.warning("LIMS info not available: LIMS sessions weren't created for for DRPilot experiments.")
