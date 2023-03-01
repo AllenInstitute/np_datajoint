@@ -55,7 +55,7 @@ S3_SESSION = dj_auth.Session(
     aws_account_id=zk_config["djsciops"]["aws"]["account_id"],
     s3_role=zk_config["djsciops"]["s3"]["role"],
     auth_client_id=zk_config["djsciops"]["djauth"]["client_id"],
-    # bearer_token=zk_config["djsciops"]["djauth"]["client_secret"],
+    auth_client_secret=zk_config["djsciops"]["djauth"]["client_secret"],
 )
 S3_BUCKET: str = zk_config["djsciops"]["s3"]["bucket"]
 
