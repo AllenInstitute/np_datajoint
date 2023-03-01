@@ -749,6 +749,7 @@ class DRPilot(DataJointSession):
         "Remote session dir re-assembled from datajoint table components. Should match our local `session_folder`"
         return f"DRpilot_{self.session_subject}_{self.session_datetime.strftime('%Y%m%d')}"
 
+    @property
     def lims_info(self) -> Optional[dict]:
         """Get LIMS info for this session. 
         """
