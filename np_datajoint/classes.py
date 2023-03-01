@@ -728,7 +728,7 @@ class DRPilot(DataJointSession):
         _, self.mouse_id, date = self.session_folder.split("_")
         self.date = datetime.datetime.strptime(date, "%Y%m%d").date()
         
-        self.session_id = self.mouse_id + date
+        self.session_id = date
         
         try:
             if self.session_folder != self.session_folder_from_dj:
