@@ -71,7 +71,12 @@ class DataJointSession:
         except dj.DataJointError:
             pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
         logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
-
+    
+    @staticmethod
+    def get_session_folder(path: str | pathlib.Path) -> str | None:
+        "Extract session folder from a string or path."
+        return utils.get_session_folder(path)
+    
     @property
     def session(self):
         "Datajoint session query - can be combined with `fetch` or `fetch1`"
