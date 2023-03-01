@@ -380,7 +380,7 @@ class DataJointSession:
 
         # upload rest of raw data
         # ------------------------------------------------------- #
-        logger.getLogger("web").info(
+        np_logging.getLogger("web").info(
             f"Started uploading raw data {self.session_folder}"
         )
         ignore_regex = ".*\.oebin"
@@ -398,7 +398,7 @@ class DataJointSession:
                 boto3_config=config.BOTO3_CONFIG,
                 ignore_regex=ignore_regex,
             )
-        logger.getLogger("web").info(
+        np_logging.getLogger("web").info(
             f"Finished uploading raw data {self.session_folder}"
         )
     
