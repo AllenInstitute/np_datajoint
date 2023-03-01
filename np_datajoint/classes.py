@@ -737,8 +737,11 @@ class DRPilot(DataJointSession):
                 )
         except dj.DataJointError:
             pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
-
+        
         logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
+        
+        utils.get_session_folder = self.get_session_folder
+        logger.warning(f'Monkey-patching utils.get_session_folder() to use {__class__}.get_session_folder()')
 
     @staticmethod
     def get_session_folder(path: str | pathlib.Path) -> str | None:
