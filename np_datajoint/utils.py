@@ -211,7 +211,7 @@ def get_single_oebin_path(path: pathlib.Path) -> pathlib.Path:
 
     - There's one structure.oebin per Recording* folder
     - Raw data folders may contain multiple Recording* folders
-    - Datajoint expects only one structure.oebing file per Session for sorting
+    - Datajoint expects only one structure.oebin file per Session for sorting
     - If we have multiple Recording* folders, we assume that there's one
         good folder - the largest - plus some small dummy / accidental recordings
     """
@@ -254,7 +254,7 @@ def get_local_remote_oebin_paths(
     paths: pathlib.Path | Sequence[pathlib.Path],
 ) -> Tuple[Sequence[pathlib.Path], pathlib.Path]:
     """
-    A `structure.oebin` file specfies the relative paths for each probe's files in a
+    A `structure.oebin` file specifies the relative paths for each probe's files in a
     raw data dir. For split recs, a different oebin file lives in each dir (ABC/DEF).
 
     To process a new session on DataJoint, a single structure.oebin file needs to be uploaded,
@@ -296,7 +296,11 @@ def get_local_remote_oebin_paths(
             # single folder supplied: we want to upload this folder
             local_session_paths.add(path)
             continue
-
+    
+    if len(local_session_paths) == 1:
+        if len(record_nodes := tuple(local_session_paths.pop().glob('Record Node*'))) > 1:
+            local_session_paths.update(record_nodes)
+            
     local_oebin_paths = sorted(
         list(set(get_single_oebin_path(p) for p in local_session_paths)),
         key=lambda s: str(s),
