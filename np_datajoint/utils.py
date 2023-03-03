@@ -304,8 +304,8 @@ def get_local_remote_oebin_paths(
             continue
     
     if len(local_session_paths) == 1:
-        if len(record_nodes := tuple(local_session_paths.pop().glob('Record Node*'))) > 1:
-            local_session_paths.update(record_nodes)
+        if len(record_nodes := tuple(next(iter(local_session_paths)).glob('Record Node*'))) > 1:
+            local_session_paths.update({_.parent for _ in record_nodes})
             
     local_oebin_paths = sorted(
         list(set(get_single_oebin_path(p) for p in local_session_paths)),
