@@ -233,13 +233,19 @@ def get_single_oebin_path(path: pathlib.Path) -> pathlib.Path:
 
 def check_xml_files_match(paths: Sequence[pathlib.Path]):
     """Check that all xml files are identical, as they should be for
-    recordings split across multiple locations e.g. A:/*_probeABC, B:/*_probeDEF"""
+    recordings split across multiple locations e.g. A:/*_probeABC, B:/*_probeDEF
+    
+    Update: xml files on two nodes can be created at different times, so their date
+    fields may differ. Everything else should be identical, so we can just check their size.
+    """
     if not all(s == ".xml" for s in [p.suffix for p in paths]):
         raise ValueError("Not all paths are XML files")
     if not all(p.is_file() for p in paths):
         raise FileNotFoundError("Not all paths are files, or they do not exist")
     if not checksums_match(paths):
-        raise ValueError("XML files do not match")
+        sizes = [p.stat().st_size for p in paths]
+        if not all(s == sizes[0] for s in sizes):
+            raise ValueError("XML files do not match")
 
 def check_session_paths_match(paths: Sequence[pathlib.Path]):
     sessions = [get_session_folder(path) for path in paths]
