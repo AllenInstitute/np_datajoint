@@ -381,11 +381,12 @@ class DataJointSession:
                 destination=f"{self.remote_session_dir_inbox}{remote_oebin_path.parent.as_posix()}/",
                 session=config.S3_SESSION,
                 s3_bucket=config.S3_BUCKET,
+                boto3_config=config.BOTO3_CONFIG,
             )
 
         # upload rest of raw data
         # ------------------------------------------------------- #
-        np_logging.getLogger("web").info(
+        np_logging.web().info(
             f"Started uploading raw data {self.session_folder}"
         )
         ignore_regex = ".*\.oebin"
@@ -403,7 +404,7 @@ class DataJointSession:
                 boto3_config=config.BOTO3_CONFIG,
                 ignore_regex=ignore_regex,
             )
-        np_logging.getLogger("web").info(
+        np_logging.web().info(
             f"Finished uploading raw data {self.session_folder}"
         )
     

@@ -13,6 +13,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+packages = [{include = "np_datajoint", from = "src"}]
 
 [tool.poetry.urls]
 "Repository" = "https://github.com/alleninstitute/np_datajoint"
@@ -23,8 +24,8 @@ python = ">=3.10,<3.12"
 numpy = "^1"
 pandas = "^1"
 ipywidgets = "*"
-datajoint = "^0.13"
-djsciops = "^1.4.1"
+datajoint = "*"
+djsciops = ">=1.5"
 requests = "*"
 seaborn = "*"
 fabric = "^2"

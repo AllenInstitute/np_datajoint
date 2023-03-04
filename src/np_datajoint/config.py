@@ -51,6 +51,9 @@ dj.config.update(
     zk_config["datajoint"]
 )  # dj.config is a custom class behaving as a dict - don't directly assign a dict
 
+# manually set this variable until there's a way to pass it via dj_auth.Session
+dj_auth.issuer = zk_config["djsciops"]["djauth"]["issuer"]
+
 S3_SESSION = dj_auth.Session(
     aws_account_id=zk_config["djsciops"]["aws"]["account_id"],
     s3_role=zk_config["djsciops"]["s3"]["role"],
