@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 
 import datetime
 import functools
@@ -71,6 +72,9 @@ class DataJointSession:
         except dj.DataJointError:
             pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
         logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.session_folder!r})"
     
     @staticmethod
     def get_session_folder(path: str | pathlib.Path) -> str | None:
@@ -268,6 +272,11 @@ class DataJointSession:
             else:
                 config.DJ_EPHYS.ClusteringTask.insert1(task_key, replace=True)
 
+    def raw_ephys_filter(self, path, probes):
+        if match := re.search("(?<=_probe)[A-F]{,}", path.name):
+            if any(p in probes for p in match[0]):
+                return path
+            
     def get_raw_ephys_paths(
         self,
         paths: Optional[Sequence[str | pathlib.Path]] = None,
@@ -288,13 +297,8 @@ class DataJointSession:
             if not isinstance(path, Sequence):
                 path = (path,)
 
-            def filter(path):
-                if match := re.search("(?<=_probe)[A-F]{,}", path.name):
-                    if any(p in probes for p in match[0]):
-                        return path
-
             matching_session_folders = {
-                s for p in path for s in utils.get_raw_ephys_subfolders(p) if filter(s)
+                s for p in path for s in utils.get_raw_ephys_subfolders(p) if self.raw_ephys_filter(s, probes)
             }
             if len(matching_session_folders) == 1 or utils.is_valid_pair_split_ephys_folders(
                 matching_session_folders
@@ -474,7 +478,7 @@ class DataJointSession:
             for sorted_paramset_idx in sorted_paramset_idxs:
                 if paramset_idx and sorted_paramset_idx != paramset_idx:
                     continue
-                logger.debug(f"Downloading sorted data for {self.session_folder} probe{chr(ord('A')+probe_idx)}, paramset_idx={sorted_paramset_idx}")
+                logger.info(f"Downloading sorted data for {self.session_folder} probe{chr(ord('A')+probe_idx)}, paramset_idx={sorted_paramset_idx}")
                 src_list, dest_list = self.filtered_remote_and_local_sorted_paths(probe_idx, sorted_paramset_idx, skip_large_files)
                 trailing_slash = '/' if 'win' not in sys.platform else '\\' # add if dest is dir
                 for src, dest in zip(src_list, dest_list):    
@@ -484,13 +488,114 @@ class DataJointSession:
                         Config=dj_axon.boto3.s3.transfer.TransferConfig(**config.BOTO3_CONFIG),
                     )
                 try:    
-                    utils.update_metrics_csv_with_missing_columns(self.session_folder, probe_idx, sorted_paramset_idx)
+                    utils.update_metrics_csv_with_missing_columns(self, probe_idx, sorted_paramset_idx)
                 except Exception as exc:
                     logger.exception(exc)
-                utils.copy_files_from_raw_to_sorted(self.session_folder, probe_idx, sorted_paramset_idx, make_symlinks=True, original_ap_continuous_dat=True)
+                self.copy_files_from_raw_to_sorted(probe_idx, sorted_paramset_idx, make_symlinks=True, original_ap_continuous_dat=True)
         logger.info(
             f"Finished downloading sorted data for {self.session_folder}"
         )
+    
+    def copy_files_from_raw_to_sorted(
+        self,
+        probe_idx: int, 
+        paramset_idx: int, 
+        make_symlinks=False,
+        original_ap_continuous_dat=True,
+        path_to_original_session_folder: Optional[pathlib.Path] = None,
+        ):
+        """Copy/rename/modify files to recreate extracted folders from Open Ephys
+        pre-v0.6.
+        
+        Instead of making duplicate copies of files, symlinks can be made wherever possible.
+        Lims upload copy utility won't follow symlinks, so the links should be made real
+        before upload (possibly by running this again with symlinks disabled).
+        
+        If we skipped download of large files from DataJoint (default behavior), we have no AP
+        `continuous.dat` file available for generating probe noise plots in QC.
+        As an alternative, we can use the original, pre-median-subtraction file from the
+        raw data folder (always symlinked due to size, and lims upload doesn't apply).  
+        """
+        probe = chr(ord('A')+probe_idx)
+        paths = self.get_raw_ephys_paths(path_to_original_session_folder, probes = probe)
+        local_oebin_paths, *_ = utils.get_local_remote_oebin_paths(paths)
+        
+        for local_oebin_path in local_oebin_paths:
+            if continuous := next(local_oebin_path.parent.glob(f'continuous/Neuropix-PXI-*.Probe{probe}-*'), None):
+                raw: pathlib.Path = local_oebin_path.parent
+                probe_folder: str = '-'.join(continuous.name.split('-')[:-1])
+                break
+        else:
+            raise FileNotFoundError(f"Could not find raw data folder for {self.session_folder} probe{probe} in {local_oebin_paths}")
+        sorted: pathlib.Path = self.dj_sorted_local_probe_path(probe_idx, paramset_idx)
+        
+        # Copy small files --------------------------------------------------------------------- #
+        src_dest = []
+        src_dest.append((
+            raw / f"events/{probe_folder}-AP/TTL/states.npy",
+            sorted / f"events/Neuropix-PXI-100.0/TTL_1/channel_states.npy",
+        ))
+        src_dest.append((
+            raw / f"events/{probe_folder}-AP/TTL/sample_numbers.npy",
+            sorted / f"events/Neuropix-PXI-100.0/TTL_1/event_timestamps.npy",
+        ))
+        src_dest.append((
+            raw / f"events/{probe_folder}-AP/TTL/sample_numbers.npy",
+            sorted / f"events/Neuropix-PXI-100.0/TTL_1/sample_numbers.npy",
+        ))
+        src_dest.append((
+            raw / f"events/{probe_folder}-AP/TTL/full_words.npy",
+            sorted / f"events/Neuropix-PXI-100.0/TTL_1/full_words.npy",
+        ))
+        src_dest.append((
+            raw / f"continuous/{probe_folder}-AP/timestamps.npy",
+            sorted / f"continuous/Neuropix-PXI-100.0/ap_timestamps.npy",
+        ))
+        src_dest.append((
+            raw / f"continuous/{probe_folder}-LFP/continuous.dat",
+            sorted / f"continuous/Neuropix-PXI-100.1/continuous.dat",
+        ))
+        src_dest.append((
+            raw / f"continuous/{probe_folder}-LFP/timestamps.npy",
+            sorted / f"continuous/Neuropix-PXI-100.1/lfp_timestamps.npy",
+        ))
+        
+        logging.debug(f"{self.session_folder} probe{probe}: copying and renaming selected files from original raw data dir to downloaded sorted data dir")
+        for src, dest in src_dest:
+            utils.symlink(src, dest) if make_symlinks else utils.copy(src, dest)
+                        
+        # Fix Open Ephys v0.6.x event timestamps ----------------------------------------------- #
+        # see https://gist.github.com/bjhardcastle/e972d59f482a549f312047221cd8eccb
+        # check we haven't already applied the operation
+        original = raw / f"events/{probe_folder}-AP/TTL/sample_numbers.npy"
+        modified = sorted / f"events/Neuropix-PXI-100.0/TTL_1/event_timestamps.npy"
+        if not modified.exists() or modified.is_symlink() or utils.checksums_match((original, modified)):
+            try:
+                modified.unlink()
+                modified.touch()
+            except OSError:
+                pass
+            logging.debug(f"{self.session_folder} probe{probe}: adjusting `sample_numbers.npy` from OpenEphys and saving as `event_timestamps.npy`")
+        
+            src = raw / f"continuous/{probe_folder}-AP/sample_numbers.npy"
+            continuous_sample_numbers = np.load(src, mmap_mode='r')
+            first_sample = continuous_sample_numbers[0]
+            
+            event_timestamps = np.load(original.open('rb'))
+            event_timestamps -= first_sample
+            with modified.open('wb') as f:
+                np.save(f, event_timestamps)
+        
+        # Create symlink to original AP data sans median-subtraction ----------------------------- #
+        if original_ap_continuous_dat:
+            src_dest = []
+            src_dest.append((
+                raw / f"continuous/{probe_folder}-AP/continuous.dat",
+                sorted / f"continuous/Neuropix-PXI-100.0/continuous.dat",
+            ))
+            logging.debug(f"{self.session_folder} probe{probe}: copying original AP continuous.dat to downloaded sorted data dir")
+            for src, dest in src_dest:
+                utils.symlink(src, dest)
 
     def sorting_summary(self, *args, **kwargs) -> pd.DataFrame:
         df = utils.sorting_summary(*args, **kwargs)
@@ -573,7 +678,7 @@ class Probe:
     def plot_metric_good_units(
         self, 
         metric:str, 
-        ax:plt.Axes=None, 
+        ax: Optional[plt.Axes] = None, 
         **kwargs
         ) -> plt.Axes | None:
         if not self.metrics_csv.exists():
@@ -727,47 +832,84 @@ class DRPilot(DataJointSession):
     
     def __init__(self, session_folder_path: str | pathlib.Path):
         self.path = pathlib.Path(session_folder_path)
-        self.session_folder = self.get_session_folder(self.path.name)
-        "DRpilot_[6-digit mouse ID]_[8-digit date]"
-        if self.session_folder is None:
+        session_folder = self.get_session_folder(self.path.name)
+        "DRpilot_[6-digit mouse ID]_[8-digit date] (used on local filesystem)"
+        if session_folder is None:
             raise SessionDirNotFoundError(
                 f"Input does not contain a session directory (e.g. DRpilot_366122_20220618): {session_folder_path}"
             )
-            
+        self.session_folder = session_folder
         _, self.mouse_id, date = self.session_folder.split("_")
         self.date = datetime.datetime.strptime(date, "%Y%m%d").date()
         
         self.session_id = date
         
-        try:
-            if self.session_folder != self.session_folder_from_dj:
-                raise SessionDirNotFoundError(
-                    f"Session folder `{self.session_folder}` does not match components on DataJoint: {self.session_folder_from_dj}"
-                )
-        except dj.DataJointError:
-            pass  # we could add metadata to datajoint here, but better to do that when uploading a folder, so we can verify session_folder string matches an actual folder
+        # with contextlib.suppress(dj.DataJointError): # may not exist on DataJoint yet
+        #     expected_session_folder_from_dj = f'{self.session_id}_{self.mouse_id}_{self.session_id}'
+        #     if expected_session_folder_from_dj != self.session_folder_from_dj:
+        #         raise SessionDirNotFoundError(
+        #             f"Session folder {expected_session_folder_from_dj} does not match components on DataJoint: {self.session_folder_from_dj}"
+        #         )
         
         logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
         
         utils.get_session_folder = self.get_session_folder
-        logger.warning(f'Monkey-patching utils.get_session_folder() to use {__class__}.get_session_folder()')
+        logger.warning(f'Monkey-patching utils.get_session_folder() to use {__name__}.{self.__class__.__name__}.get_session_folder()')
 
     @staticmethod
     def get_session_folder(path: str | pathlib.Path) -> str | None:
-        """Extract ["DRpilot_[6-digit mouse ID]_[8-digit date str] from a string or path.
+        """Extract [DRpilot_[6-digit mouse ID]_[8-digit date str] from a string or
+        path.
         """
+        # from filesystem
         session_reg_exp = R"DRpilot_[0-9]{6}_[0-9]{8}"
-
         session_folders = re.findall(session_reg_exp, str(path))
-        return session_folders[0] if session_folders else None
-    
+        if session_folders:
+            return session_folders[0] 
+        
+        # from datajoint (sessionID must be an int)
+        session_reg_exp = R"[0-9]{8}_[0-9]{6}_[0-9]{8}"
+        session_folders = re.findall(session_reg_exp, str(path))
+        if session_folders:
+            d1, mouse, d2 = session_folders[0].split("_")
+            return f"DRpilot_{mouse}_{d2}" if (d1 == d2) else None
+        
+    def raw_ephys_filter(self, path, probes):
+        if match := re.search("(?<=_probe)[A-F]{,}", path.name):
+            if any(p in probes for p in match[0]):
+                return path
+            
     @property
     def session_folder_from_dj(self) -> str:
         "Remote session dir re-assembled from datajoint table components. Should match our local `session_folder`"
-        return f"DRpilot_{self.session_subject}_{self.session_datetime.strftime('%Y%m%d')}"
+        return f"{self.date:%Y%m%d}_{self.session_subject}_{self.date:%Y%m%d}"
+    
+    @property
+    def local_download_path(self) -> pathlib.Path:
+        return pathlib.Path(config.LOCAL_INBOX) # currently workgroups/dynamicrouting/datajoint
+        
+    def dj_sorted_local_probe_path(self, probe_idx: int, sorted_paramset_idx: int = config.DEFAULT_KS_PARAMS_INDEX):
+        return self.local_download_path / f"ks_paramset_idx_{sorted_paramset_idx}" / self.session_folder / f"{self.session_folder}_probe{chr(ord('A') + probe_idx)}_sorted"
 
     @property
     def lims_info(self) -> Optional[dict]:
         """Get LIMS info for this session. 
         """
         logger.warning("LIMS info not available: LIMS sessions weren't created for for DRPilot experiments.")
+
+    @classmethod
+    def sorted_sessions(cls, *args, **kwargs) -> Iterable[DRPilot]:
+        df = utils.sorting_summary(*args, **kwargs)
+        with contextlib.suppress(SessionDirNotFoundError): # will raise on non-DRpilot sessions
+            yield from (
+                cls(session) for session in df.loc[df["all_done"] == 1].index
+            )
+            
+    def copy_files_from_raw_to_sorted(self, *args, **kwargs):
+        for _ in self.storage_dirs:
+            if (original_path := (_ / self.session_folder)).exists():
+                break
+        else:
+            raise FileNotFoundError(f"Could not find original raw data for {self.session_folder} in any of {self.storage_dirs}")
+        super().copy_files_from_raw_to_sorted(*args, **kwargs, path_to_original_session_folder=original_path)
+    

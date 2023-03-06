@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 
 import datetime
 import functools
@@ -19,9 +20,10 @@ import traceback
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import (Generator, List, Literal, MutableSequence, Optional,
+from typing import (Any, Generator, List, Literal, MutableSequence, Optional,
                     Sequence, Set, Tuple)
 
+import np_logging
 import datajoint as dj
 import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
@@ -29,12 +31,13 @@ import djsciops.settings as dj_settings
 import fabric
 import IPython
 import ipywidgets as ipw
-import np_logging
 import numpy as np
 import pandas as pd
 import requests
 
 from np_datajoint import classes, config
+
+logger = np_logging.getLogger(__name__)
 
 sorting_status_last_checked: dict[Optional[int], datetime.datetime] = dict()
 
@@ -70,11 +73,11 @@ def copy(src:pathlib.Path, dest:pathlib.Path):
         True if not dest.exists() else not checksums_match((src, dest))
     ):
         if attempts == 2:
-            logging.debug(f"Failed to copy {src} to {dest} with checksum-validation after {attempts=}")
+            logger.debug(f"Failed to copy {src} to {dest} with checksum-validation after {attempts=}")
             return
         shutil.copy2(src,dest)
         attempts += 1
-    logging.debug(f"Copied {src} to {dest} with checksum-validation")
+    logger.debug(f"Copied {src} to {dest} with checksum-validation")
 
 def symlink(src:pathlib.Path, dest:pathlib.Path):
     if 'win' in sys.platform:
@@ -82,13 +85,13 @@ def symlink(src:pathlib.Path, dest:pathlib.Path):
         subprocess.run('fsutil behavior set SymlinkEvaluation R2R:1')
     if not pathlib.Path(dest).parent.exists():
         pathlib.Path(dest).parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        if dest.is_symlink() and dest.resolve() == src.resolve():
-            logging.debug(f"Symlink already exists to {src} from {dest}")
-            return
-        dest.unlink()
-    dest.symlink_to(src)
-    logging.debug(f"Created symlink to {src} from {dest}")
+    if dest.is_symlink() and dest.resolve() == src.resolve():
+        logger.debug(f"Symlink already exists to {src} from {dest}")
+        return
+    dest.unlink(missing_ok=True)
+    with contextlib.suppress(FileExistsError):
+        dest.symlink_to(src)
+    logger.debug(f"Created symlink to {src} from {dest}")
                 
 def get_session_folder(path: str | pathlib.Path) -> str | None:
     """Extract [8+digit session ID]_[6-digit mouse ID]_[8-digit date
@@ -98,7 +101,7 @@ def get_session_folder(path: str | pathlib.Path) -> str | None:
     session_folders = re.findall(session_reg_exp, str(path))
     if session_folders:
         if not all(s == session_folders[0] for s in session_folders):
-            logging.debug(
+            logger.debug(
                 f"Mismatch between session folder strings - file may be in the wrong folder: {path}"
             )
         return session_folders[0]
@@ -116,6 +119,8 @@ def dir_size(path: pathlib.Path) -> int:
     )
     return dir_size
 
+def read_oebin(path: str | pathlib.Path) -> dict[str, Any]:
+    return json.loads(pathlib.Path(path).read_bytes())
 
 # local ephys-related (pre-upload) ----------------------------------------------------- #
 def is_new_ephys_folder(path: pathlib.Path) -> bool:
@@ -231,7 +236,7 @@ def get_single_oebin_path(path: pathlib.Path) -> pathlib.Path:
     else:
         raise FileNotFoundError(f"No structure.oebin found in {path}")
 
-def check_xml_files_match(paths: Sequence[pathlib.Path]):
+def check_xml_files_match(paths: Sequence[pathlib.Path]) -> None:
     """Check that all xml files are identical, as they should be for
     recordings split across multiple locations e.g. A:/*_probeABC, B:/*_probeDEF
     
@@ -247,7 +252,7 @@ def check_xml_files_match(paths: Sequence[pathlib.Path]):
         if not all(s == sizes[0] for s in sizes):
             raise ValueError("XML files do not match")
 
-def check_session_paths_match(paths: Sequence[pathlib.Path]):
+def check_session_paths_match(paths: Sequence[pathlib.Path]) -> None:
     sessions = [get_session_folder(path) for path in paths]
     if any(not s for s in sessions):
         raise ValueError(
@@ -258,7 +263,7 @@ def check_session_paths_match(paths: Sequence[pathlib.Path]):
 
 def get_local_remote_oebin_paths(
     paths: pathlib.Path | Sequence[pathlib.Path],
-) -> Tuple[Sequence[pathlib.Path], pathlib.Path]:
+) -> tuple[tuple[pathlib.Path, ...], pathlib.Path]:
     """
     A `structure.oebin` file specifies the relative paths for each probe's files in a
     raw data dir. For split recs, a different oebin file lives in each dir (ABC/DEF).
@@ -292,7 +297,7 @@ def get_local_remote_oebin_paths(
             break  # we're done anyway, just making this clear
 
         if ephys_subfolders:
-            logging.warning(
+            logger.warning(
                 f"Multiple subfolders of raw data found in {path} - expected a single folder."
             )
             local_session_paths.update(e for e in ephys_subfolders)
@@ -305,12 +310,12 @@ def get_local_remote_oebin_paths(
     
     if len(local_session_paths) == 1:
         if len(record_nodes := tuple(next(iter(local_session_paths)).glob('Record Node*'))) > 1:
-            local_session_paths.update({_.parent for _ in record_nodes})
+            local_session_paths.update(record_nodes)
             
-    local_oebin_paths = sorted(
-        list(set(get_single_oebin_path(p) for p in local_session_paths)),
+    local_oebin_paths = tuple(
+        sorted(list(set(get_single_oebin_path(p) for p in local_session_paths)),
         key=lambda s: str(s),
-    )
+    ))
 
     local_session_paths_for_upload = [p.parent.parent.parent for p in local_oebin_paths]
     # settings.xml file should be the same for _probeABC and _probeDEF dirs
@@ -350,7 +355,7 @@ def create_merged_oebin_file(
         [p / "settings.xml" for p in [o.parent.parent.parent for o in paths]]
     )
 
-    logging.debug(f"Creating merged oebin file with {probes=} from {paths}")
+    logger.debug(f"Creating merged oebin file with {probes=} from {paths}")
     merged_oebin: dict = {}
     for oebin in sorted(paths):
 
@@ -439,7 +444,7 @@ def get_clustering_parameters(
 
 def all_sessions() -> dj.Table:
     "Correctly formatted sessions on Datajoint."
-    logging.debug("Fetching all correctly-formatted sessions from DataJoint server")
+    logger.debug("Fetching all correctly-formatted sessions from DataJoint server")
     all_sessions = config.DJ_SESSION.Session.fetch()
     session_str_match_on_datajoint = lambda x: bool(
         get_session_folder(f"{x[1]}_{x[0]}_{x[2].strftime('%Y%m%d')}")
@@ -469,7 +474,7 @@ def get_sorting_status_all_sessions(
             return schema & {"paramset_idx": None}
         return schema & {"paramset_idx": paramset_idx}
 
-    logging.debug(
+    logger.debug(
         f'Restricting processing status summary to sessions with paramset_idx={paramset_idx if paramset_idx is not None else "all"}'
     )
 
@@ -526,7 +531,7 @@ def get_sorting_status_all_sessions(
     if sorting_status_last_checked.get(
         paramset_idx, datetime.datetime.now()
     ) < datetime.datetime.now() - datetime.timedelta(hours=1):
-        logging.debug("Clearing cache for _get_sorting_status_all_sessions")
+        logger.debug("Clearing cache for _get_sorting_status_all_sessions")
         _get_sorting_status_all_sessions.cache_clear()
     return _get_sorting_status_all_sessions(paramset_idx)
 
@@ -548,6 +553,25 @@ def sorting_summary(
         + "_"
         + x.session_datetime.dt.strftime("%Y%m%d")
     )
+    def session_str_from_datajoint_keys(x):
+        try: 
+            return (
+            x.session_id.astype(str)
+            + "_"
+            + x.subject
+            + "_"
+            + x.session_datetime.dt.strftime("%Y%m%d")
+        )
+        except:
+            return (
+            'DRpilot'
+            + "_"
+            + x.subject
+            + "_"
+            + x.session_datetime.dt.strftime("%Y%m%d")
+        )
+    
+            
     df = df.assign(session=session_str_from_datajoint_keys)
     # filter for sessions with correctly formatted session/mouse/date keys
     df = df.loc[~(pd.Series(map(get_session_folder, df.session)).isnull())]
@@ -567,101 +591,11 @@ def sorted_sessions(*args, **kwargs) -> Iterable[classes.DataJointSession]:
 def update_metrics_csv_with_missing_columns(path_or_session_folder: str | pathlib.Path, probe_idx: int, paramset_idx: int):
     probe = classes.ProbeDataJoint(session=path_or_session_folder, probe_letter=chr(probe_idx + ord('A')), paramset_idx=paramset_idx)
     if 'quality' in pd.read_csv(probe.metrics_csv).columns:
-        logging.debug(f'{probe.metrics_csv} already contains columns added from DataJoint tables')
+        logger.debug(f'{probe.metrics_csv} already contains columns added from DataJoint tables')
         return
     path = str(probe.metrics_csv)
     probe.metrics_df.to_csv(path)
-    logging.debug(f'updated {probe.metrics_csv} with missing columns from DataJoint tables')
-
-def copy_files_from_raw_to_sorted(path_or_session_folder: str | pathlib.Path, probe_idx: int, paramset_idx: int, make_symlinks=False, original_ap_continuous_dat=True):
-    """Copy/rename/modify files to recreate extracted folders from Open Ephys
-    pre-v0.6.
-    
-    Instead of making duplicate copies of files, symlinks can be made wherever possible.
-    Lims upload copy utility won't follow symlinks, so the links should be made real
-    before upload (possibly by running this again with symlinks disabled).
-    
-    If we skipped download of large files from DataJoint (default behavior), we have no AP
-    `continuous.dat` file available for generating probe noise plots in QC.
-    As an alternative, we can use the original, pre-median-subtraction file from the
-    raw data folder (always symlinked due to size, and lims upload doesn't apply).  
-    """
-    self = classes.DataJointSession(path_or_session_folder)
-    probe = chr(ord('A')+probe_idx)
-    paths = self.get_raw_ephys_paths(probes = probe)
-    local_oebin_paths, *_ = get_local_remote_oebin_paths(paths)
-    assert len(local_oebin_paths) == 1
-        
-    raw: pathlib.Path = local_oebin_paths[0].parent
-    sorted: pathlib.Path = self.dj_sorted_local_probe_path(probe_idx, paramset_idx)
-    
-    # Copy small files --------------------------------------------------------------------- #
-    src_dest = []
-    src_dest.append((
-        raw / f"events/Neuropix-PXI-100.Probe{probe}-AP/TTL/states.npy",
-        sorted / f"events/Neuropix-PXI-100.0/TTL_1/channel_states.npy",
-    ))
-    src_dest.append((
-        raw / f"events/Neuropix-PXI-100.Probe{probe}-AP/TTL/sample_numbers.npy",
-        sorted / f"events/Neuropix-PXI-100.0/TTL_1/event_timestamps.npy",
-    ))
-    src_dest.append((
-        raw / f"events/Neuropix-PXI-100.Probe{probe}-AP/TTL/sample_numbers.npy",
-        sorted / f"events/Neuropix-PXI-100.0/TTL_1/sample_numbers.npy",
-    ))
-    src_dest.append((
-        raw / f"events/Neuropix-PXI-100.Probe{probe}-AP/TTL/full_words.npy",
-        sorted / f"events/Neuropix-PXI-100.0/TTL_1/full_words.npy",
-    ))
-    src_dest.append((
-        raw / f"continuous/Neuropix-PXI-100.Probe{probe}-AP/timestamps.npy",
-        sorted / f"continuous/Neuropix-PXI-100.0/ap_timestamps.npy",
-    ))
-    src_dest.append((
-        raw / f"continuous/Neuropix-PXI-100.Probe{probe}-LFP/continuous.dat",
-        sorted / f"continuous/Neuropix-PXI-100.1/continuous.dat",
-    ))
-    src_dest.append((
-        raw / f"continuous/Neuropix-PXI-100.Probe{probe}-LFP/timestamps.npy",
-        sorted / f"continuous/Neuropix-PXI-100.1/lfp_timestamps.npy",
-    ))
-    
-    logging.debug(f"{self.session_folder} probe{probe}: copying and renaming selected files from original raw data dir to downloaded sorted data dir")
-    for src, dest in src_dest:
-        symlink(src, dest) if make_symlinks else copy(src, dest)
-                    
-    # Fix Open Ephys v0.6.x event timestamps ----------------------------------------------- #
-    # see https://gist.github.com/bjhardcastle/e972d59f482a549f312047221cd8eccb
-    # check we haven't already applied the operation
-    original = raw / f"events/Neuropix-PXI-100.Probe{probe}-AP/TTL/sample_numbers.npy"
-    modified = sorted / f"events/Neuropix-PXI-100.0/TTL_1/event_timestamps.npy"
-    if not modified.exists() or modified.is_symlink() or checksums_match((original, modified)):
-        try:
-            modified.unlink()
-            modified.touch()
-        except OSError:
-            pass
-        logging.debug(f"{self.session_folder} probe{probe}: adjusting `sample_numbers.npy` from OpenEphys and saving as `event_timestamps.npy`")
-    
-        src = raw / f"continuous/Neuropix-PXI-100.Probe{probe}-AP/sample_numbers.npy"
-        continuous_sample_numbers = np.load(src, mmap_mode='r')
-        first_sample = continuous_sample_numbers[0]
-        
-        event_timestamps = np.load(original.open('rb'))
-        event_timestamps -= first_sample
-        with modified.open('wb') as f:
-            np.save(f, event_timestamps)
-    
-    # Create symlink to original AP data sans median-subtraction ----------------------------- #
-    if original_ap_continuous_dat:
-        src_dest = []
-        src_dest.append((
-            raw / f"continuous/Neuropix-PXI-100.Probe{probe}-AP/continuous.dat",
-            sorted / f"continuous/Neuropix-PXI-100.0/continuous.dat",
-        ))
-        logging.debug(f"{self.session_folder} probe{probe}: copying original AP continuous.dat to downloaded sorted data dir")
-        for src, dest in src_dest:
-            symlink(src, dest)
+    logger.debug(f'updated {probe.metrics_csv} with missing columns from DataJoint tables')
 
 def database_diagram() -> IPython.display.SVG:
     diagram = (
@@ -762,7 +696,7 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
         upload_button.disabled = True
         upload_button.button_style = "warning"
         with out:
-            logging.info(f"Uploading probes: {probes_from_grid()}")
+            logger.info(f"Uploading probes: {probes_from_grid()}")
         session = classes.DataJointSession(session_dropdown.value)
         session.upload(probes=probes_from_grid())
 
@@ -770,7 +704,7 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
 
     def handle_progress_change(change):
         with out:
-            logging.info("Fetching summary from DataJoint...")
+            logger.info("Fetching summary from DataJoint...")
         progress_button.button_style = ""
         progress_button.disabled = True
         session = classes.DataJointSession(session_dropdown.value)
@@ -778,7 +712,7 @@ def session_upload_from_acq_widget() -> ipw.AppLayout:
             with out:
                 IPython.display.display(session.sorting_summary())
         except dj.DataJointError:
-            logging.info(
+            logger.info(
                 f"No entry found in DataJoint for session {session_dropdown.value}"
             )
 
