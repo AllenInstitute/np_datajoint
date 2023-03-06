@@ -14,12 +14,12 @@ logger = np_logging.getLogger()
 
 RUNNING_ON_HPC = True # prevent transfer of job to HPC - won't work with DRPilot class currently
 
-root = pathlib.Path('//allen/programs/mindscope/workgroups/dynamicrouting/PilotEphys/Task 2 pilot')
-for path in root.glob('DRpilot*'):
-    session = DRPilot(path)
-    probe_dirs = tuple(session.path.glob('*_probe*'))
-    if not probe_dirs:
-        print(f'No probe dirs found for {session.path.name}')
-        continue
+for root in DRPilot.storage_dirs:
+    for path in root.glob('DRpilot*'):
+        session = DRPilot(path)
+        probe_dirs = tuple(session.path.glob('*_probe*'))
+        if not probe_dirs:
+            print(f'No probe dirs found for {session.path.name}')
+            continue
 
-    session.upload(probe_dirs)
+        session.upload(probe_dirs)

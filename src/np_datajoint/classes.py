@@ -717,6 +717,14 @@ class ProbeDataJoint(Probe):
 class DRPilot(DataJointSession):
     """A class to handle data transfers between local rigs/network shares, and the DataJoint server."""
 
+    storage_dirs = tuple(
+        pathlib.Path(_) for _ in
+            (
+                '//10.128.50.140/Data2',
+                '//allen/programs/mindscope/workgroups/dynamicrouting/PilotEphys/Task 2 pilot',
+                '//allen/programs/mindscope/workgroups/np-exp/PilotEphys/Task 2 pilot',
+            ))
+    
     def __init__(self, session_folder_path: str | pathlib.Path):
         self.path = pathlib.Path(session_folder_path)
         self.session_folder = self.get_session_folder(self.path.name)
