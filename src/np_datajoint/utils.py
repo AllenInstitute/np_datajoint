@@ -20,8 +20,8 @@ import traceback
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import (Any, Generator, List, Literal, MutableSequence, Optional,
-                    Sequence, Set, Tuple)
+from typing import (Any, Literal, Optional,
+                    Sequence,)
 
 import np_logging
 import datajoint as dj
@@ -29,17 +29,15 @@ import djsciops.authentication as dj_auth
 import djsciops.axon as dj_axon
 import djsciops.settings as dj_settings
 import fabric
-import IPython
+import IPython.display
 import ipywidgets as ipw
 import numpy as np
 import pandas as pd
 import requests
 
-from np_datajoint import classes, config
+from np_datajoint import config
 
 logger = np_logging.getLogger(__name__)
-
-sorting_status_last_checked: dict[Optional[int], datetime.datetime] = dict()
 
 class SessionDirNotFoundError(ValueError):
     pass
@@ -71,7 +69,7 @@ def copy(src:pathlib.Path, dest:pathlib.Path):
         dest.unlink()
     while (
         True if not dest.exists() else not checksums_match((src, dest))
-    ):
+    ):  
         if attempts == 2:
             logger.debug(f"Failed to copy {src} to {dest} with checksum-validation after {attempts=}")
             return
@@ -92,20 +90,6 @@ def symlink(src:pathlib.Path, dest:pathlib.Path):
     with contextlib.suppress(FileExistsError):
         dest.symlink_to(src)
     logger.debug(f"Created symlink to {src} from {dest}")
-                
-def get_session_folder(path: str | pathlib.Path) -> str | None:
-    """Extract [8+digit session ID]_[6-digit mouse ID]_[8-digit date
-    str] from a string or path"""
-    session_reg_exp = R"[0-9]{8,}_[0-9]{6}_[0-9]{8}"
-
-    session_folders = re.findall(session_reg_exp, str(path))
-    if session_folders:
-        if not all(s == session_folders[0] for s in session_folders):
-            logger.debug(
-                f"Mismatch between session folder strings - file may be in the wrong folder: {path}"
-            )
-        return session_folders[0]
-    return None
 
 def dir_size(path: pathlib.Path) -> int:
     """Return the size of a directory in bytes"""
@@ -143,30 +127,8 @@ def is_valid_ephys_folder(path: pathlib.Path) -> bool:
     return True
 
 
-def is_valid_pair_split_ephys_folders(paths: Sequence[pathlib.Path]) -> bool:
-    "Check a pair of dirs of raw data for size, matching settings.xml, v0.6.x+ to confirm they're from the same session and meet expected criteria."
-    if not paths:
-        return False
 
-    if any(not is_valid_ephys_folder(path) for path in paths):
-        return False
-
-    check_session_paths_match(paths)
-    check_xml_files_match([tuple(path.rglob("settings*.xml"))[0] for path in paths])
-
-    size_difference_threshold_gb = 2
-    dir_sizes_gb = tuple(round(dir_size(path) / 1024**3) for path in paths)
-    diffs = (abs(dir_sizes_gb[0] - size) for size in dir_sizes_gb)
-    if not all(diff <= size_difference_threshold_gb for diff in diffs):
-        print(
-            f"raw data folders are not within {size_difference_threshold_gb} GB of each other"
-        )
-        return False
-
-    return True
-
-
-def get_raw_ephys_subfolders(path: pathlib.Path) -> List[pathlib.Path]:
+def get_raw_ephys_subfolders(path: pathlib.Path) -> list[pathlib.Path]:
     """
     Return a list of raw ephys recording folders, defined as the root that Open Ephys
     records to, e.g. `A:/1233245678_366122_20220618_probeABC`.
@@ -252,84 +214,6 @@ def check_xml_files_match(paths: Sequence[pathlib.Path]) -> None:
         if not all(s == sizes[0] for s in sizes):
             raise ValueError("XML files do not match")
 
-def check_session_paths_match(paths: Sequence[pathlib.Path]) -> None:
-    sessions = [get_session_folder(path) for path in paths]
-    if any(not s for s in sessions):
-        raise ValueError(
-            "Paths supplied must be session folders: [8+digit lims session ID]_[6-digit mouse ID]_[6-digit datestr]"
-        )
-    if not all(s and s == sessions[0] for s in sessions):
-        raise ValueError("Paths must all be for the same session")
-
-def get_local_remote_oebin_paths(
-    paths: pathlib.Path | Sequence[pathlib.Path],
-) -> tuple[tuple[pathlib.Path, ...], pathlib.Path]:
-    """
-    A `structure.oebin` file specifies the relative paths for each probe's files in a
-    raw data dir. For split recs, a different oebin file lives in each dir (ABC/DEF).
-
-    To process a new session on DataJoint, a single structure.oebin file needs to be uploaded,
-    and its dir on the server specified in the SessionDirectory table / `session_dir` key.
-    
-    Input one or more paths to raw data folders that exist locally for a single
-    session, and this func returns the paths to the `structure.oebin` file for each local folder,
-    plus the expected relative path on the remote server for a single combined .oebin file.
-
-    We need to upload the folder containing a `settings.xml` file - two
-    folders above the structure.oebin file - but with only the subfolders returned from this function.
-    """
-
-    if isinstance(paths, pathlib.Path):
-        paths = (paths,)
-
-    if not any(is_new_ephys_folder(path) for path in paths):
-        raise ValueError("No new ephys folder found in paths")
-    check_session_paths_match(paths)
-
-    local_session_paths: set[pathlib.Path] = set()
-    for path in paths:
-
-        ephys_subfolders = get_raw_ephys_subfolders(path)
-
-        if ephys_subfolders and len(paths) == 1:
-            # parent folder supplied: we want to upload its subfolders
-            local_session_paths.update(e for e in ephys_subfolders)
-            break  # we're done anyway, just making this clear
-
-        if ephys_subfolders:
-            logger.warning(
-                f"Multiple subfolders of raw data found in {path} - expected a single folder."
-            )
-            local_session_paths.update(e for e in ephys_subfolders)
-            continue
-
-        if is_new_ephys_folder(path):
-            # single folder supplied: we want to upload this folder
-            local_session_paths.add(path)
-            continue
-    
-    if len(local_session_paths) == 1:
-        if len(record_nodes := tuple(next(iter(local_session_paths)).glob('Record Node*'))) > 1:
-            local_session_paths.update(record_nodes)
-            
-    local_oebin_paths = tuple(
-        sorted(list(set(get_single_oebin_path(p) for p in local_session_paths)),
-        key=lambda s: str(s),
-    ))
-
-    local_session_paths_for_upload = [p.parent.parent.parent for p in local_oebin_paths]
-    # settings.xml file should be the same for _probeABC and _probeDEF dirs
-    if len(local_session_paths_for_upload) > 1:
-        check_xml_files_match([p / "settings.xml" for p in local_session_paths_for_upload])
-
-    # and for the server we just want to point to the oebin file from two levels above -
-    # shouldn't matter which oebin path we look at here, they should all have the same
-    # relative structure
-    remote_oebin_path = local_oebin_paths[0].relative_to(
-        local_oebin_paths[0].parent.parent.parent
-    )
-
-    return local_oebin_paths, remote_oebin_path
 
 
 def create_merged_oebin_file(
@@ -368,7 +252,7 @@ def create_merged_oebin_file(
                 continue
 
             # 'continuous', 'events', 'spikes' are lists, which we want to concatenate across files
-            if isinstance(oebin_data[key], List):
+            if isinstance(oebin_data[key], list):
                 for item in oebin_data[key]:
                     if merged_oebin.get(key, None) and item in merged_oebin[key]:
                         continue
@@ -435,176 +319,12 @@ def add_new_ks_paramset(
 
 def get_clustering_parameters(
     paramset_idx: int = config.DEFAULT_KS_PARAMS_INDEX,
-) -> Tuple[str, dict]:
+) -> tuple[str, dict]:
     "Get description and dict of parameters from paramset_idx."
     return (config.DJ_EPHYS.ClusteringParamSet & {"paramset_idx": paramset_idx}).fetch1(
         "params"
     )
 
-
-def all_sessions() -> dj.Table:
-    "Correctly formatted sessions on Datajoint."
-    logger.debug("Fetching all correctly-formatted sessions from DataJoint server")
-    all_sessions = config.DJ_SESSION.Session.fetch()
-    session_str_match_on_datajoint = lambda x: bool(
-        get_session_folder(f"{x[1]}_{x[0]}_{x[2].strftime('%Y%m%d')}")
-    )
-    return (
-        config.DJ_SESSION.Session
-        & all_sessions[list(map(session_str_match_on_datajoint, all_sessions))]
-    )
-
-
-def get_sorting_status_all_sessions(
-    paramset_idx: Optional[int] = config.DEFAULT_KS_PARAMS_INDEX,
-) -> dj.Table:
-    """Summary of processing for all probes across all sessions, with optional restriction on paramset_idx - modified from Thinh@DJ.
-    - `paramset_idx = None` returns all probes
-    - `paramset_idx = -1` returns probes with no paramset_idx (ie. haven't started
-      processing)
-
-    Table is returned, can be further restricted with queries.
-    """
-
-    def paramset_restricted(schema: dj.schemas.Schema) -> dj.schemas.Schema:
-        "Restrict table to sessions that used one or more paramset_idx."
-        if paramset_idx is None:
-            return schema
-        if -1 == paramset_idx:
-            return schema & {"paramset_idx": None}
-        return schema & {"paramset_idx": paramset_idx}
-
-    logger.debug(
-        f'Restricting processing status summary to sessions with paramset_idx={paramset_idx if paramset_idx is not None else "all"}'
-    )
-
-    @functools.cache
-    def _get_sorting_status_all_sessions(paramset_idx) -> dj.Table:
-        "Calling all these tables is slow (>10s), so cache the result."
-        sorting_status_last_checked[paramset_idx] = datetime.datetime.now()
-
-        session_process_status = all_sessions()
-
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            config.DJ_EPHYS.ProbeInsertion,
-            probes="count(insertion_number)",
-            keep_all_rows=True,
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            config.DJ_EPHYS.EphysRecording,
-            ephys="count(insertion_number)",
-            keep_all_rows=True,
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            config.DJ_EPHYS.LFP, lfp="count(insertion_number)", keep_all_rows=True
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            paramset_restricted(config.DJ_EPHYS.ClusteringTask),
-            task="count(insertion_number)",
-            keep_all_rows=True,
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            paramset_restricted(config.DJ_EPHYS.Clustering),
-            clustering="count(insertion_number)",
-            keep_all_rows=True,
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            paramset_restricted(config.DJ_EPHYS.QualityMetrics),
-            metrics="count(insertion_number)",
-            keep_all_rows=True,
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            paramset_restricted(config.DJ_EPHYS.WaveformSet),
-            waveform="count(insertion_number)",
-            keep_all_rows=True,
-        )
-        session_process_status *= config.DJ_SESSION.Session.aggr(
-            paramset_restricted(config.DJ_EPHYS.WaveformSet),
-            curated="count(insertion_number)",
-            pidx_done='GROUP_CONCAT(insertion_number SEPARATOR ", ")',
-            keep_all_rows=True,
-        )
-        return session_process_status.proj(
-            ..., all_done="probes > 0 AND waveform = task"
-        )
-
-    if sorting_status_last_checked.get(
-        paramset_idx, datetime.datetime.now()
-    ) < datetime.datetime.now() - datetime.timedelta(hours=1):
-        logger.debug("Clearing cache for _get_sorting_status_all_sessions")
-        _get_sorting_status_all_sessions.cache_clear()
-    return _get_sorting_status_all_sessions(paramset_idx)
-
-
-def sorting_summary(
-    paramset_idx: Optional[int] = config.DEFAULT_KS_PARAMS_INDEX,
-) -> pd.DataFrame:
-    """Summary of processing for all probes across all sessions, with optional restriction on `paramset_idx` - modified from Thinh@DJ.
-    - `paramset_idx = None` returns all probes
-    - `paramset_idx = -1` returns probes with no paramset_idx (ie. haven't started
-      processing)
-    """
-    df = pd.DataFrame(get_sorting_status_all_sessions(paramset_idx))
-    # make new 'session' column that matches our local session folder names
-    session_str_from_datajoint_keys = (
-        lambda x: x.session_id.astype(str)
-        + "_"
-        + x.subject
-        + "_"
-        + x.session_datetime.dt.strftime("%Y%m%d")
-    )
-    def session_str_from_datajoint_keys(x):
-        try: 
-            return (
-            x.session_id.astype(str)
-            + "_"
-            + x.subject
-            + "_"
-            + x.session_datetime.dt.strftime("%Y%m%d")
-        )
-        except:
-            return (
-            'DRpilot'
-            + "_"
-            + x.subject
-            + "_"
-            + x.session_datetime.dt.strftime("%Y%m%d")
-        )
-    
-            
-    df = df.assign(session=session_str_from_datajoint_keys)
-    # filter for sessions with correctly formatted session/mouse/date keys
-    df = df.loc[~(pd.Series(map(get_session_folder, df.session)).isnull())]
-    df.set_index("session", inplace=True)
-    df.sort_values(by="session", ascending=False, inplace=True)
-    # remove columns that were concatenated into the new 'session' column
-    df.drop(columns=["session_id", "subject", "session_datetime", "lfp"], inplace=True)
-    return df
-
-
-def sorted_sessions(*args, **kwargs) -> Iterable[classes.DataJointSession]:
-    df = sorting_summary(*args, **kwargs)
-    yield from (
-        classes.DataJointSession(session) for session in df.loc[df["all_done"] == 1].index
-    )
-
-def update_metrics_csv_with_missing_columns(path_or_session_folder: str | pathlib.Path, probe_idx: int, paramset_idx: int):
-    probe = classes.ProbeDataJoint(session=path_or_session_folder, probe_letter=chr(probe_idx + ord('A')), paramset_idx=paramset_idx)
-    if 'quality' in pd.read_csv(probe.metrics_csv).columns:
-        logger.debug(f'{probe.metrics_csv} already contains columns added from DataJoint tables')
-        return
-    path = str(probe.metrics_csv)
-    probe.metrics_df.to_csv(path)
-    logger.debug(f'updated {probe.metrics_csv} with missing columns from DataJoint tables')
-
-def database_diagram() -> IPython.display.SVG:
-    diagram = (
-        dj.Diagram(config.DJ_SUBJECT.Subject)
-        + dj.Diagram(config.DJ_SESSION.Session)
-        + dj.Diagram(config.DJ_PROBE)
-        + dj.Diagram(config.DJ_EPHYS)
-    )
-    return diagram.make_svg()
 
 
 def is_hab(session_folder: pathlib.Path) -> Optional[bool]:
@@ -615,144 +335,3 @@ def is_hab(session_folder: pathlib.Path) -> Optional[bool]:
         return False
     return None
 
-def session_upload_from_acq_widget() -> ipw.AppLayout:
-
-    sessions = []
-    if config.RUNNING_ON_ACQ:
-        folders = get_raw_ephys_subfolders(pathlib.Path("A:")) + get_raw_ephys_subfolders(
-            pathlib.Path("B:")
-        )
-        sessions = [
-            get_session_folder(folder) 
-            for folder in folders 
-            if get_session_folder(folder) and is_new_ephys_folder(folder)
-        ]
-        for session in sessions:
-            if sessions.count(session) < 2:
-                sessions.remove(session) # folders that aren't split across A:/B:
-    
-    if not sessions:
-        for f in filter(get_session_folder, config.NPEXP_PATH.iterdir()):
-            if (
-                f.name == get_session_folder(f.name) # excl dir names that have '- copy' appeneded
-                and datetime.datetime.strptime(f.name.split('_')[-1], '%Y%m%d') > (datetime.datetime.now() - datetime.timedelta(days=14))
-                and not is_hab(f)
-            ):
-                sessions.append(f.name)
-
-    sessions = sorted(list(set(sessions)))
-    probes_available_to_upload = 'ABCDEF'
-
-    out = ipw.Output(layout={"border": "1px solid black"})
-
-    session_dropdown = ipw.Dropdown(
-        options=sessions,
-        value=None,
-        description="session",
-        disabled=False,
-    )
-
-    upload_button = ipw.ToggleButton(
-        description="Upload",
-        disabled=True,
-        button_style="",  # 'success', 'info', 'warning', 'danger' or ''
-        tooltip="Upload raw data to DataJoint",
-        icon="cloud-upload",  # (FontAwesome names without the `fa-` prefix)
-    )
-
-    progress_button = ipw.ToggleButton(
-        description="Check sorting", 
-        disabled=True,
-        button_style="",  # 'success', 'info', 'warning', 'danger' or ''
-        tooltip="Check sorting progress on DataJoint",
-        icon="hourglass-half",  # (FontAwesome names without the `fa-` prefix)
-    )
-
-    surface_image = ipw.Image()
-    surface_image.layout.height = '300px'
-    surface_image.layout.visibility = 'hidden'
-    
-    def update_surface_image():
-        for img in (config.NPEXP_PATH / session_dropdown.value).glob('*surface-image*'):
-            if any(inserted_img in img.name for inserted_img in ('image4', 'image5')):
-                break
-        else:
-            surface_image.layout.visibility = 'hidden'
-            return
-        with img.open('rb') as f:
-            surface_image.value = f.read()
-        surface_image.layout.visibility = 'visible'
-            
-    def handle_dropdown_change(change):
-        if get_session_folder(change.new) is not None:
-            upload_button.disabled = False
-            upload_button.button_style = "warning"
-            progress_button.disabled = False
-            progress_button.button_style = "info"
-            update_surface_image()
-    session_dropdown.observe(handle_dropdown_change, names="value")
-
-    def handle_upload_change(change):
-        upload_button.disabled = True
-        upload_button.button_style = "warning"
-        with out:
-            logger.info(f"Uploading probes: {probes_from_grid()}")
-        session = classes.DataJointSession(session_dropdown.value)
-        session.upload(probes=probes_from_grid())
-
-    upload_button.observe(handle_upload_change, names="value")
-
-    def handle_progress_change(change):
-        with out:
-            logger.info("Fetching summary from DataJoint...")
-        progress_button.button_style = ""
-        progress_button.disabled = True
-        session = classes.DataJointSession(session_dropdown.value)
-        try:
-            with out:
-                IPython.display.display(session.sorting_summary())
-        except dj.DataJointError:
-            logger.info(
-                f"No entry found in DataJoint for session {session_dropdown.value}"
-            )
-
-    progress_button.observe(handle_progress_change, names="value")
-
-    buttons = ipw.HBox([upload_button, progress_button])
-
-    probe_select_grid = ipw.GridspecLayout(6, 1, grid_gap="0px")
-    for idx, probe_letter in enumerate(probes_available_to_upload):
-        probe_select_grid[idx, 0] = ipw.Checkbox(
-            value=True,
-            description=f"probe{probe_letter}",
-            disabled=False,
-            indent=True,
-        )
-    probe_select_and_image = ipw.HBox([surface_image, probe_select_grid])
-    def probes_from_grid() -> str:
-        probe_letters = ""
-        for idx in range(6):
-            if probe_select_grid[idx, 0].value == True:
-                probe_letters += chr(ord("A") + idx)
-        return probe_letters
-
-    app = ipw.TwoByTwoLayout(
-        top_right=probe_select_and_image,
-        bottom_right=out,
-        bottom_left=buttons,
-        top_left=session_dropdown,
-        width="100%",
-        justify_items="center",
-        align_items="center",
-    )
-    return IPython.display.display(app)
-
-def local_dj_probe_pairs() -> Iterable[dict[str, classes.Probe]]:
-    for session in sorted_sessions():
-        for probe in config.DEFAULT_PROBES:
-            try:
-                local = classes.ProbeLocal(session, probe)
-                dj = classes.ProbeDataJoint(session, probe)
-                yield dict(local=local, dj=dj)
-            except FileNotFoundError:
-                continue

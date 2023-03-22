@@ -20,8 +20,8 @@ import traceback
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import (Generator, List, Literal, MutableSequence, Optional,
-                    Sequence, Set, Tuple)
+from typing import (Generator, Optional,
+                    Sequence, ClassVar)
 
 import datajoint as dj
 import djsciops.authentication as dj_auth
@@ -46,10 +46,16 @@ class SessionDirNotFoundError(ValueError):
     pass
 
 class DataJointSession:
-    """A class to handle data transfers between local rigs/network shares, and the DataJoint server."""
+    """A class to handle data transfers between local rigs/network shares, and the
+    DataJoint server.
+    
+    Uses lims session id as Datajoint session id. 
+    """
+    
+    sorting_status_last_checked: ClassVar[dict[Optional[int], datetime.datetime]] = dict()
 
     def __init__(self, path_or_session_folder: str | pathlib.Path):
-        session_folder = utils.get_session_folder(str(path_or_session_folder))
+        session_folder = self.get_session_folder(str(path_or_session_folder))
         if session_folder is None:
             raise SessionDirNotFoundError(
                 f"Input does not contain a session directory (e.g. 123456789_366122_20220618): {path_or_session_folder}"
@@ -78,9 +84,71 @@ class DataJointSession:
     
     @staticmethod
     def get_session_folder(path: str | pathlib.Path) -> str | None:
-        "Extract session folder from a string or path."
-        return utils.get_session_folder(path)
+        """Extract [8+digit session ID]_[6-digit mouse ID]_[8-digit date
+        str] from a string or path"""
+        session_reg_exp = R"[0-9]{8,}_[0-9]{6}_[0-9]{8}"
+
+        session_folders = re.findall(session_reg_exp, str(path))
+        if session_folders:
+            if not all(s == session_folders[0] for s in session_folders):
+                logger.debug(
+                    f"Mismatch between session folder strings - file may be in the wrong folder: {path}"
+                )
+            return session_folders[0]
+        return None
+        
+    @classmethod
+    def sorted_sessions(cls, *args, **kwargs) -> Iterable[DataJointSession]:
+        df = cls.sorting_summary(*args, **kwargs)
+        yield from (
+            cls(session) for session in df.loc[df["all_done"] == 1].index
+        )
+
+    @staticmethod
+    def session_str_from_datajoint_keys(session: DataJointSession):
+        return (
+            session.session_id.astype(str)
+            + "_"
+            + session.subject
+            + "_"
+            + session.session_datetime.dt.strftime("%Y%m%d")
+        )
     
+    @classmethod
+    def sorting_summary(
+        cls,
+        paramset_idx: Optional[int] = config.DEFAULT_KS_PARAMS_INDEX,
+    ) -> pd.DataFrame:
+        """Summary of processing for all probes across all sessions, with optional restriction on `paramset_idx` - modified from Thinh@DJ.
+        - `paramset_idx = None` returns all probes
+        - `paramset_idx = -1` returns probes with no paramset_idx (ie. haven't started
+        processing)
+        """
+        df = pd.DataFrame(cls.get_sorting_status_all_sessions(paramset_idx))
+        # make new 'session' column that matches our local session folder names
+        df = df.assign(session=cls.session_str_from_datajoint_keys)
+        # filter for sessions with correctly formatted session/mouse/date keys
+        df = df.loc[~(pd.Series(map(cls.get_session_folder, df.session)).isnull())]
+        df.set_index("session", inplace=True)
+        df.sort_values(by="session", ascending=False, inplace=True)
+        # remove columns that were concatenated into the new 'session' column
+        df.drop(columns=["session_id", "subject", "session_datetime", "lfp"], inplace=True)
+        df.sort_index(inplace=True)
+        return df
+
+    @classmethod    
+    def all_sessions(cls) -> dj.Table:
+        "Correctly formatted sessions on Datajoint."
+        logger.debug("Fetching all correctly-formatted sessions from DataJoint server")
+        all_sessions = config.DJ_SESSION.Session.fetch()
+        session_str_match_on_datajoint = lambda x: bool(
+            cls.get_session_folder(f"{x[1]}_{x[0]}_{x[2].strftime('%Y%m%d')}")
+        )
+        return (
+            config.DJ_SESSION.Session
+            & all_sessions[list(map(session_str_match_on_datajoint, all_sessions))]
+        )
+
     @property
     def session(self):
         "Datajoint session query - can be combined with `fetch` or `fetch1`"
@@ -208,7 +276,7 @@ class DataJointSession:
         self,
         paramset_idx: int = config.DEFAULT_KS_PARAMS_INDEX,
         probe_letters: Sequence[str] = config.DEFAULT_PROBES,
-    ):
+    ) -> None:
         "For existing entries in config.DJ_EPHYS.EphysRecording, create a new ClusteringTask with the specified `paramset_idx`"
         if not self.probe_insertion:
             logger.info(
@@ -270,7 +338,7 @@ class DataJointSession:
                 logger.info(f"Clustering task already exists: {task_key}")
                 return
             else:
-                config.DJ_EPHYS.ClusteringTask.insert1(task_key, replace=True)
+                config.DJ_EPHYS.ClusteringTask.insert1(task_key, skip_duplicates=True)
 
     def raw_ephys_filter(self, path, probes):
         if match := re.search("(?<=_probe)[A-F]{,}", path.name):
@@ -300,13 +368,138 @@ class DataJointSession:
             matching_session_folders = {
                 s for p in path for s in utils.get_raw_ephys_subfolders(p) if self.raw_ephys_filter(s, probes)
             }
-            if len(matching_session_folders) == 1 or utils.is_valid_pair_split_ephys_folders(
+            if len(matching_session_folders) == 1 or self.is_valid_pair_split_ephys_folders(
                 matching_session_folders
             ):
                 logger.debug(matching_session_folders)
                 return tuple(matching_session_folders)
         else:
             raise FileNotFoundError(f"No valid ephys raw data folders (v0.6+) found")
+        
+    @classmethod
+    def get_sorting_status_all_sessions(
+        cls,
+        paramset_idx: Optional[int] = config.DEFAULT_KS_PARAMS_INDEX,
+    ) -> dj.Table:
+        """Summary of processing for all probes across all sessions, with optional restriction on paramset_idx - modified from Thinh@DJ.
+        - `paramset_idx = None` returns all probes
+        - `paramset_idx = -1` returns probes with no paramset_idx (ie. haven't started
+        processing)
+
+        Table is returned, can be further restricted with queries.
+        """
+
+        def paramset_restricted(schema: dj.schemas.Schema) -> dj.schemas.Schema:
+            "Restrict table to sessions that used one or more paramset_idx."
+            if paramset_idx is None:
+                return schema
+            if -1 == paramset_idx:
+                return schema & {"paramset_idx": None}
+            return schema & {"paramset_idx": paramset_idx}
+
+        logger.debug(
+            f'Restricting processing status summary to sessions with paramset_idx = {paramset_idx if paramset_idx is not None else "all"}'
+        )
+        @functools.cache
+        def _get_sorting_status_all_sessions(paramset_idx) -> dj.Table:
+            "Calling all these tables is slow (>10s), so cache the result."
+            cls.sorting_status_last_checked[paramset_idx] = datetime.datetime.now()
+
+            session_process_status = cls.all_sessions()
+
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                config.DJ_EPHYS.ProbeInsertion,
+                probes="count(insertion_number)",
+                keep_all_rows=True,
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                config.DJ_EPHYS.EphysRecording,
+                ephys="count(insertion_number)",
+                keep_all_rows=True,
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                config.DJ_EPHYS.LFP, lfp="count(insertion_number)", keep_all_rows=True
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                paramset_restricted(config.DJ_EPHYS.ClusteringTask),
+                task="count(insertion_number)",
+                keep_all_rows=True,
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                paramset_restricted(config.DJ_EPHYS.Clustering),
+                clustering="count(insertion_number)",
+                keep_all_rows=True,
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                paramset_restricted(config.DJ_EPHYS.QualityMetrics),
+                metrics="count(insertion_number)",
+                keep_all_rows=True,
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                paramset_restricted(config.DJ_EPHYS.WaveformSet),
+                waveform="count(insertion_number)",
+                keep_all_rows=True,
+            )
+            session_process_status *= config.DJ_SESSION.Session.aggr(
+                paramset_restricted(config.DJ_EPHYS.WaveformSet),
+                curated="count(insertion_number)",
+                pidx_done='GROUP_CONCAT(insertion_number SEPARATOR ", ")',
+                keep_all_rows=True,
+            )
+            return session_process_status.proj(
+                ..., all_done="probes > 0 AND waveform = task"
+            )
+
+        if cls.sorting_status_last_checked.get(
+            paramset_idx, datetime.datetime.now()
+        ) < datetime.datetime.now() - datetime.timedelta(hours=1):
+            logger.debug("Clearing cache for _get_sorting_status_all_sessions")
+            _get_sorting_status_all_sessions.cache_clear()
+        return _get_sorting_status_all_sessions(paramset_idx)
+
+    @classmethod
+    def local_dj_probe_pairs(cls) -> Iterable[dict[str, Probe]]:
+        for session in cls.sorted_sessions():
+            for probe in config.DEFAULT_PROBES:
+                try:
+                    local = ProbeLocal(session, probe)
+                    dj = ProbeDataJoint(session, probe)
+                    yield dict(local=local, dj=dj)
+                except FileNotFoundError:
+                    continue
+    
+    @classmethod
+    def check_session_paths_match(cls, paths: Sequence[pathlib.Path]) -> None:
+        sessions = [cls.get_session_folder(path) for path in paths]
+        if any(not s for s in sessions):
+            raise ValueError(
+                "Paths supplied must be session folders: [8+digit lims session ID]_[6-digit mouse ID]_[6-digit datestr]"
+            )
+        if not all(s and s == sessions[0] for s in sessions):
+            raise ValueError("Paths must all be for the same session")
+
+    @classmethod
+    def is_valid_pair_split_ephys_folders(cls, paths: Sequence[pathlib.Path]) -> bool:
+        "Check a pair of dirs of raw data for size, matching settings.xml, v0.6.x+ to confirm they're from the same session and meet expected criteria."
+        if not paths:
+            return False
+
+        if any(not utils.is_valid_ephys_folder(path) for path in paths):
+            return False
+
+        cls.check_session_paths_match(paths)
+        utils.check_xml_files_match([tuple(path.rglob("settings*.xml"))[0] for path in paths])
+
+        size_difference_threshold_gb = 2
+        dir_sizes_gb = tuple(round(utils.dir_size(path) / 1024**3) for path in paths)
+        diffs = (abs(dir_sizes_gb[0] - size) for size in dir_sizes_gb)
+        if not all(diff <= size_difference_threshold_gb for diff in diffs):
+            print(
+                f"raw data folders are not within {size_difference_threshold_gb} GB of each other"
+            )
+            return False
+
+        return True
 
     def upload_from_hpc(self, paths, probes, without_sorting):
         "Relay job to HPC. See .upload() for input arg details."
@@ -336,6 +529,78 @@ class DataJointSession:
             # ensures slurm job doesn't run until conda env is activated
             logger.debug(cmd)
 
+    @classmethod
+    def get_local_remote_oebin_paths(
+        cls,
+        paths: pathlib.Path | Sequence[pathlib.Path],
+    ) -> tuple[tuple[pathlib.Path, ...], pathlib.Path]:
+        """
+        A `structure.oebin` file specifies the relative paths for each probe's files in a
+        raw data dir. For split recs, a different oebin file lives in each dir (ABC/DEF).
+
+        To process a new session on DataJoint, a single structure.oebin file needs to be uploaded,
+        and its dir on the server specified in the SessionDirectory table / `session_dir` key.
+        
+        Input one or more paths to raw data folders that exist locally for a single
+        session, and this func returns the paths to the `structure.oebin` file for each local folder,
+        plus the expected relative path on the remote server for a single combined .oebin file.
+
+        We need to upload the folder containing a `settings.xml` file - two
+        folders above the structure.oebin file - but with only the subfolders returned from this function.
+        """
+
+        if isinstance(paths, pathlib.Path):
+            paths = (paths,)
+
+        if not any(utils.is_new_ephys_folder(path) for path in paths):
+            raise ValueError("No new ephys folder found in paths")
+        cls.check_session_paths_match(paths)
+
+        local_session_paths: set[pathlib.Path] = set()
+        for path in paths:
+
+            ephys_subfolders = utils.get_raw_ephys_subfolders(path)
+
+            if ephys_subfolders and len(paths) == 1:
+                # parent folder supplied: we want to upload its subfolders
+                local_session_paths.update(e for e in ephys_subfolders)
+                break  # we're done anyway, just making this clear
+
+            if ephys_subfolders:
+                logger.warning(
+                    f"Multiple subfolders of raw data found in {path} - expected a single folder."
+                )
+                local_session_paths.update(e for e in ephys_subfolders)
+                continue
+
+            if utils.is_new_ephys_folder(path):
+                # single folder supplied: we want to upload this folder
+                local_session_paths.add(path)
+                continue
+        
+        if len(local_session_paths) == 1:
+            if len(record_nodes := tuple(next(iter(local_session_paths)).glob('Record Node*'))) > 1:
+                local_session_paths.update(record_nodes)
+                
+        local_oebin_paths = tuple(
+            sorted(list(set(utils.get_single_oebin_path(p) for p in local_session_paths)),
+            key=lambda s: str(s),
+        ))
+
+        local_session_paths_for_upload = [p.parent.parent.parent for p in local_oebin_paths]
+        # settings.xml file should be the same for _probeABC and _probeDEF dirs
+        if len(local_session_paths_for_upload) > 1:
+            utils.check_xml_files_match([p / "settings.xml" for p in local_session_paths_for_upload])
+
+        # and for the server we just want to point to the oebin file from two levels above -
+        # shouldn't matter which oebin path we look at here, they should all have the same
+        # relative structure
+        remote_oebin_path = local_oebin_paths[0].relative_to(
+            local_oebin_paths[0].parent.parent.parent
+        )
+
+        return local_oebin_paths, remote_oebin_path
+
     def upload(
         self,
         paths: Optional[Sequence[str | pathlib.Path]] = None,
@@ -350,7 +615,7 @@ class DataJointSession:
         paths = self.get_raw_ephys_paths(paths, probes)
         logger.debug(f"Paths to upload: {paths}")
 
-        local_oebin_paths, remote_oebin_path = utils.get_local_remote_oebin_paths(paths)
+        local_oebin_paths, remote_oebin_path = self.get_local_remote_oebin_paths(paths)
         local_session_paths_for_upload = (
             p.parent.parent.parent for p in local_oebin_paths
         )
@@ -425,7 +690,7 @@ class DataJointSession:
         "Return list of sorted probe files on server and list of corresponding local paths, with mods to match internal sorting pipeline names/folder structure."
         large_file_threshold_gb = 1
         
-        remote_sorted_probe_dir: pathlib.Path = self.remote_sorted_probe_dir(probe_idx, paramset_idx)
+        remote_sorted_probe_dir: str = self.remote_sorted_probe_dir(probe_idx, paramset_idx)
         local_sorted_probe_dir: pathlib.Path = self.dj_sorted_local_probe_path(probe_idx, paramset_idx)
         
         all_src_files: dict[str, str] = dj_axon.list_files(
@@ -488,7 +753,7 @@ class DataJointSession:
                         Config=dj_axon.boto3.s3.transfer.TransferConfig(**config.BOTO3_CONFIG),
                     )
                 try:    
-                    utils.update_metrics_csv_with_missing_columns(self, probe_idx, sorted_paramset_idx)
+                    self.update_metrics_csv_with_missing_columns(probe_idx, sorted_paramset_idx)
                 except Exception as exc:
                     logger.exception(exc)
                 self.copy_files_from_raw_to_sorted(probe_idx, sorted_paramset_idx, make_symlinks=True, original_ap_continuous_dat=True)
@@ -518,7 +783,7 @@ class DataJointSession:
         """
         probe = chr(ord('A')+probe_idx)
         paths = self.get_raw_ephys_paths(path_to_original_session_folder, probes = probe)
-        local_oebin_paths, *_ = utils.get_local_remote_oebin_paths(paths)
+        local_oebin_paths, *_ = self.get_local_remote_oebin_paths(paths)
         
         for local_oebin_path in local_oebin_paths:
             if continuous := next(local_oebin_path.parent.glob(f'continuous/Neuropix-PXI-*.Probe{probe}-*'), None):
@@ -597,9 +862,6 @@ class DataJointSession:
             for src, dest in src_dest:
                 utils.symlink(src, dest)
 
-    def sorting_summary(self, *args, **kwargs) -> pd.DataFrame:
-        df = utils.sorting_summary(*args, **kwargs)
-        return df.loc[[self.session_folder]].transpose()
 
     def create_session_entry(self, remote_oebin_path: pathlib.Path):
         "Insert metadata for session in datajoint tables"
@@ -640,7 +902,83 @@ class DataJointSession:
                 replace=True,
             )
 
+    def update_metrics_csv_with_missing_columns(self, probe_idx: int, paramset_idx: int):
+        probe = ProbeDataJoint(self, probe_letter=chr(probe_idx + ord('A')), paramset_idx=paramset_idx)
+        if 'quality' in pd.read_csv(probe.metrics_csv).columns:
+            logger.debug(f'{probe.metrics_csv} already contains columns added from DataJoint tables')
+            return
+        path = str(probe.metrics_csv)
+        probe.metrics_df.to_csv(path)
+        logger.debug(f'updated {probe.metrics_csv} with missing columns from DataJoint tables')
 
+    def plot_driftmap(self, insertion_number, paramset_idx, shank_no=0):
+        
+        if isinstance(insertion_number, str):
+            insertion_number = ord(insertion_number) - ord('A')
+        
+        units = (config.DJ_EPHYS.CuratedClustering.Unit * config.DJ_PROBE.ElectrodeConfig.Electrode
+                & self.probe_insertion & {'insertion_number': insertion_number} & {'paramset_idx': paramset_idx}
+                & 'cluster_quality_label = "good"')
+        units = (units.proj('spike_times', 'spike_depths')
+                * config.DJ_EPHYS.ProbeInsertion.proj()
+                * config.DJ_PROBE.ProbeType.Electrode.proj('shank') & {'shank': shank_no})
+        
+        spike_times, spike_depths = units.fetch('spike_times', 'spike_depths', order_by='unit')
+        spike_times = np.hstack(spike_times)
+        spike_depths = np.hstack(spike_depths)
+        
+        # time-depth 2D histogram
+        time_bin_count = 1000
+        depth_bin_count = 200
+
+        spike_bins = np.linspace(0, spike_times.max(), time_bin_count)
+        depth_bins = np.linspace(0, np.nanmax(spike_depths), depth_bin_count)
+
+        spk_count, spk_edges, depth_edges = np.histogram2d(spike_times, spike_depths, bins=[spike_bins, depth_bins])
+        spk_rates = spk_count / np.mean(np.diff(spike_bins))
+        spk_edges = spk_edges[:-1]
+        depth_edges = depth_edges[:-1]
+        
+        # canvas setup
+        fig = plt.figure(figsize=(16, 8))
+        grid = plt.GridSpec(12, 12)
+
+        ax_main = plt.subplot(grid[1:, 0:10])
+        ax_cbar = plt.subplot(grid[0, 0:10])
+        ax_spkcount = plt.subplot(grid[1:, 10:])
+
+        # -- plot main --
+        im = ax_main.imshow(spk_rates.T, aspect='auto', cmap='gray_r',
+                            extent=[spike_bins[0], spike_bins[-1], depth_bins[-1], depth_bins[0]])
+        # cosmetic
+        ax_main.invert_yaxis()
+        ax_main.set_xlabel('Time (sec)')
+        ax_main.set_ylabel('Distance from tip sites (um)')
+        ax_main.set_ylim(depth_edges[0], depth_edges[-1])
+        ax_main.spines['right'].set_visible(False)
+        ax_main.spines['top'].set_visible(False)
+
+        cb = fig.colorbar(im, cax=ax_cbar, orientation='horizontal')
+        cb.outline.set_visible(False)
+        cb.ax.xaxis.tick_top()
+        cb.set_label('Firing rate (Hz)')
+        cb.ax.xaxis.set_label_position('top')
+
+        # -- plot spikecount --
+        ax_spkcount.plot(spk_count.sum(axis=0) / 10e3, depth_edges, 'k')
+        ax_spkcount.set_xlabel('Spike count (x$10^3$)')
+        ax_spkcount.set_yticks([])
+        ax_spkcount.set_ylim(depth_edges[0], depth_edges[-1])
+
+        ax_spkcount.spines['right'].set_visible(False)
+        ax_spkcount.spines['top'].set_visible(False)
+        ax_spkcount.spines['bottom'].set_visible(False)
+        ax_spkcount.spines['left'].set_visible(False)
+        
+        fig.suptitle({'insertion_number': insertion_number, 'paramset_idx': paramset_idx, 'shank_no': shank_no})
+        
+        return fig
+        
 class Probe:
     
     def __init__(self, session:str|DataJointSession, probe_letter:str, **kwargs):
@@ -745,8 +1083,7 @@ class Probe:
         units_df = units_df.set_index('uid')
         units_df = units_df.loc[units_df['quality']=='good']
         self._qc_units_df = units_df
-        
-        
+            
 class ProbeLocal(Probe):
     def __init__(self,*args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -754,15 +1091,14 @@ class ProbeLocal(Probe):
             raise FileNotFoundError(f"Probe data expected at {self.sorted_data_dir}")
     
     @property
-    def sorted_data_dir(self) -> pathlib.Path:
+    def sorted_data_dir(self) -> pathlib.Path | Sequence[pathlib.Path]:
         return self.session.npexp_sorted_probe_paths(self.probe_letter)
 
     @property
     def depth_img(self) -> pathlib.Path:
         img = self.sorted_data_dir.parent.parent / f'probe_depth_{self.probe_letter}.png' 
         return img if img.exists() else self.sorted_data_dir.parent.parent / f'probe_depth.png'
-    
-    
+
 class ProbeDataJoint(Probe):
     
     paramset_idx: int # 1 = KS2.0, 2 = KS2.5
@@ -820,7 +1156,17 @@ class ProbeDataJoint(Probe):
       
 
 class DRPilot(DataJointSession):
-    """A class to handle data transfers between local rigs/network shares, and the DataJoint server."""
+    """A class to handle data transfers between local rigs/network shares, and the
+    DataJoint server.
+    
+    Lims session IDs weren't used for these experiments:
+    
+    - local session folder is named 'DRpilot_[labtracks mouse ID]_[8-digit date]'
+
+    - DataJoint session ID is [8-digit date]
+    """
+    
+    sorting_status_last_checked: ClassVar[dict[Optional[int], datetime.datetime]] = dict()
 
     storage_dirs = tuple(
         pathlib.Path(_) for _ in
@@ -831,31 +1177,24 @@ class DRPilot(DataJointSession):
             ))
     
     def __init__(self, session_folder_path: str | pathlib.Path):
-        self.path = pathlib.Path(session_folder_path)
-        session_folder = self.get_session_folder(self.path.name)
+        session_folder = self.get_session_folder(session_folder_path)
         "DRpilot_[6-digit mouse ID]_[8-digit date] (used on local filesystem)"
         if session_folder is None:
             raise SessionDirNotFoundError(
                 f"Input does not contain a session directory (e.g. DRpilot_366122_20220618): {session_folder_path}"
             )
         self.session_folder = session_folder
+        for _ in self.storage_dirs:
+            if (path := _ / self.session_folder).exists():
+                self.path = path
+                break
         _, self.mouse_id, date = self.session_folder.split("_")
         self.date = datetime.datetime.strptime(date, "%Y%m%d").date()
         
         self.session_id = date
         
-        # with contextlib.suppress(dj.DataJointError): # may not exist on DataJoint yet
-        #     expected_session_folder_from_dj = f'{self.session_id}_{self.mouse_id}_{self.session_id}'
-        #     if expected_session_folder_from_dj != self.session_folder_from_dj:
-        #         raise SessionDirNotFoundError(
-        #             f"Session folder {expected_session_folder_from_dj} does not match components on DataJoint: {self.session_folder_from_dj}"
-        #         )
-        
         logger.debug("%s initialized %s", self.__class__.__name__, self.session_folder)
         
-        utils.get_session_folder = self.get_session_folder
-        logger.warning(f'Monkey-patching utils.get_session_folder() to use {__name__}.{self.__class__.__name__}.get_session_folder()')
-
     @staticmethod
     def get_session_folder(path: str | pathlib.Path) -> str | None:
         """Extract [DRpilot_[6-digit mouse ID]_[8-digit date str] from a string or
@@ -884,6 +1223,16 @@ class DRPilot(DataJointSession):
         "Remote session dir re-assembled from datajoint table components. Should match our local `session_folder`"
         return f"{self.date:%Y%m%d}_{self.session_subject}_{self.date:%Y%m%d}"
     
+    @staticmethod
+    def session_str_from_datajoint_keys(session: DRPilot):
+        return (
+            'DRpilot'
+            + "_"
+            + session.subject
+            + "_"
+            + session.session_datetime.dt.strftime("%Y%m%d")
+        )
+
     @property
     def local_download_path(self) -> pathlib.Path:
         return pathlib.Path(config.LOCAL_INBOX) # currently workgroups/dynamicrouting/datajoint
@@ -899,7 +1248,7 @@ class DRPilot(DataJointSession):
 
     @classmethod
     def sorted_sessions(cls, *args, **kwargs) -> Iterable[DRPilot]:
-        df = utils.sorting_summary(*args, **kwargs)
+        df = cls.sorting_summary(*args, **kwargs)
         with contextlib.suppress(SessionDirNotFoundError): # will raise on non-DRpilot sessions
             yield from (
                 cls(session) for session in df.loc[df["all_done"] == 1].index
@@ -912,4 +1261,4 @@ class DRPilot(DataJointSession):
         else:
             raise FileNotFoundError(f"Could not find original raw data for {self.session_folder} in any of {self.storage_dirs}")
         super().copy_files_from_raw_to_sorted(*args, **kwargs, path_to_original_session_folder=original_path)
-    
+
