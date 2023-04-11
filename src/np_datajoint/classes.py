@@ -688,7 +688,7 @@ class DataJointSession:
     
     def filtered_remote_and_local_sorted_paths(self, probe_idx: int, paramset_idx: int, skip_large_files=True) -> tuple[Sequence[str], Sequence[str]]:
         "Return list of sorted probe files on server and list of corresponding local paths, with mods to match internal sorting pipeline names/folder structure."
-        large_file_threshold_gb = 1
+        large_file_threshold_gb = 10
         
         remote_sorted_probe_dir: str = self.remote_sorted_probe_dir(probe_idx, paramset_idx)
         local_sorted_probe_dir: pathlib.Path = self.dj_sorted_local_probe_path(probe_idx, paramset_idx)
