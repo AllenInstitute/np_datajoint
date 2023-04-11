@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "np-datajoint"
-version = "0.0.5"
+version = "0.0.6"
 description = "Tools for spike-sorting Mindscope neuropixels ecephys sessions on DataJoint, retrieving results and comparing with locally-sorted equivalents."
 authors = [
     "Ben Hardcastle <ben.hardcastle@alleninstitute.org>",
